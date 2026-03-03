@@ -74,7 +74,17 @@ impl fmt::Debug for Palette256 {
 
 impl ColorPalette {
     fn apply_override(&self, color: SrgbaTuple) -> SrgbaTuple {
-        self.color_overrides.get(&color).copied().unwrap_or(color)
+        // Convert to 8-bit RGB for comparison to avoid floating point precision issues
+        let to_u8 = |f: f32| (f * 255.0).round() as u8;
+        let (r, g, b, _) = (to_u8(color.0), to_u8(color.1), to_u8(color.2), to_u8(color.3));
+
+        for (from, to) in &self.color_overrides {
+            let (fr, fg, fb, _) = (to_u8(from.0), to_u8(from.1), to_u8(from.2), to_u8(from.3));
+            if r == fr && g == fg && b == fb {
+                return *to;
+            }
+        }
+        color
     }
 
     pub fn resolve_fg(&self, color: ColorAttribute) -> SrgbaTuple {
@@ -82,15 +92,15 @@ impl ColorPalette {
             ColorAttribute::Default => self.foreground,
             ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
             ColorAttribute::TrueColorWithPaletteFallback(color, _)
-            | ColorAttribute::TrueColorWithDefaultFallback(color) => {
-                self.apply_override(color.into())
-            }
+            | ColorAttribute::TrueColorWithDefaultFallback(color) => color.into(),
         }
     }
     pub fn resolve_bg(&self, color: ColorAttribute) -> SrgbaTuple {
         match color {
             ColorAttribute::Default => self.background,
-            ColorAttribute::PaletteIndex(idx) => self.colors.0[idx as usize],
+            ColorAttribute::PaletteIndex(idx) => {
+                self.apply_override(self.colors.0[idx as usize])
+            }
             ColorAttribute::TrueColorWithPaletteFallback(color, _)
             | ColorAttribute::TrueColorWithDefaultFallback(color) => {
                 self.apply_override(color.into())
