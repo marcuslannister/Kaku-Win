@@ -19,6 +19,7 @@ use std::cell::RefCell;
 use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -87,12 +88,75 @@ thread_local! {
 lazy_static::lazy_static! {
     static ref PENDING_SERVICE_OPENS: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
     static ref PENDING_TTY_ACTIVATIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref LAST_SERVICE_OPEN_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
     static ref GLOBAL_HOTKEY_STATE: Mutex<GlobalHotKeyState> =
         Mutex::new(GlobalHotKeyState::default());
 }
 // macOS can emit applicationOpenUntitledFile twice while no window has
 // materialized yet; keep a wider debounce to avoid duplicate SpawnWindow work.
 const OPEN_UNTITLED_SPAWN_DEBOUNCE: Duration = Duration::from_millis(1200);
+const OPEN_UNTITLED_DEFER_SPAWN_DELAY: Duration = Duration::from_millis(350);
+// Guard against startup races: when launched with an explicit file/folder to open,
+// macOS may still emit applicationOpenUntitledFile and cause an extra "~/” tab.
+const OPEN_UNTITLED_AFTER_SERVICE_OPEN_GUARD: Duration = Duration::from_secs(5);
+static OPEN_UNTITLED_SPAWN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn note_service_open_request() {
+    *LAST_SERVICE_OPEN_REQUEST.lock().unwrap() = Some(Instant::now());
+    // Cancel any pending deferred untitled spawn from applicationOpenUntitledFile.
+    OPEN_UNTITLED_SPAWN_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+}
+
+fn should_suppress_open_untitled_spawn() -> bool {
+    if !PENDING_SERVICE_OPENS.lock().unwrap().is_empty() {
+        return true;
+    }
+
+    let now = Instant::now();
+    LAST_SERVICE_OPEN_REQUEST
+        .lock()
+        .unwrap()
+        .map(|ts| now.duration_since(ts) < OPEN_UNTITLED_AFTER_SERVICE_OPEN_GUARD)
+        .unwrap_or(false)
+}
+
+fn schedule_open_untitled_spawn() {
+    let sequence = OPEN_UNTITLED_SPAWN_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
+    promise::spawn::spawn(async move {
+        async_io::Timer::after(OPEN_UNTITLED_DEFER_SPAWN_DELAY).await;
+        promise::spawn::spawn_into_main_thread(async move {
+            if OPEN_UNTITLED_SPAWN_SEQUENCE.load(Ordering::SeqCst) != sequence {
+                return;
+            }
+
+            if should_suppress_open_untitled_spawn() {
+                log::debug!(
+                    "Skipping deferred applicationOpenUntitledFile spawn because a service \
+                     open request was received"
+                );
+                return;
+            }
+
+            let Some(conn) = Connection::get() else {
+                return;
+            };
+
+            let has_window = {
+                let windows = conn.windows.borrow();
+                windows.values().next().is_some()
+            };
+            if has_window {
+                return;
+            }
+
+            conn.dispatch_app_event(ApplicationEvent::PerformKeyAssignment(
+                KeyAssignment::SpawnWindow,
+            ));
+        })
+        .detach();
+    })
+    .detach();
+}
 
 #[derive(Default)]
 struct GlobalHotKeyState {
@@ -427,6 +491,14 @@ extern "C" fn application_open_untitled_file(
                 });
                 window.borrow_mut().focus();
             } else {
+                if should_suppress_open_untitled_spawn() {
+                    log::debug!(
+                        "Skipping applicationOpenUntitledFile because a service open request \
+                         was received recently"
+                    );
+                    return YES;
+                }
+
                 let should_spawn = LAST_OPEN_UNTITLED_SPAWN.with(|last| {
                     let now = Instant::now();
                     let mut last = last.borrow_mut();
@@ -443,9 +515,7 @@ extern "C" fn application_open_untitled_file(
                 });
 
                 if should_spawn {
-                    conn.dispatch_app_event(ApplicationEvent::PerformKeyAssignment(
-                        KeyAssignment::SpawnWindow,
-                    ));
+                    schedule_open_untitled_spawn();
                 }
             }
         }
@@ -478,25 +548,23 @@ extern "C" fn show_settings_window(_self: &mut Object, _sel: Sel, _sender: *mut 
 }
 
 extern "C" fn application_open_file(
-    this: &mut Object,
+    _this: &mut Object,
     _sel: Sel,
     _app: *mut Object,
     file_name: *mut Object,
 ) -> BOOL {
-    let launched: BOOL = unsafe { *this.get_ivar("launched") };
-    if launched == YES {
-        let file_name = unsafe { nsstring_to_str(file_name) }.to_string();
-        if let Some(conn) = Connection::get() {
-            log::debug!("application_open_file {file_name}");
-            conn.dispatch_app_event(ApplicationEvent::OpenCommandScript(file_name));
-            return YES;
-        }
+    let file_name = unsafe { nsstring_to_str(file_name) }.to_string();
+    if file_name.is_empty() {
+        return NO;
     }
-    NO
+
+    log::debug!("application_open_file {file_name}");
+    dispatch_or_queue_service_open(file_name, true);
+    YES
 }
 
 extern "C" fn application_open_files(
-    this: &mut Object,
+    _this: &mut Object,
     _sel: Sel,
     app: *mut Object,
     file_names: *mut Object,
@@ -507,24 +575,22 @@ extern "C" fn application_open_files(
     const NSApplicationDelegateReplyFailure: NSInteger = 2;
 
     let mut reply = NSApplicationDelegateReplyFailure;
-    let launched: BOOL = unsafe { *this.get_ivar("launched") };
-    if launched == YES {
-        if let Some(conn) = Connection::get() {
-            let mut dispatched = false;
-            unsafe {
-                let count: NSInteger = msg_send![file_names, count];
-                for i in 0..count {
-                    let file_name: *mut Object = msg_send![file_names, objectAtIndex: i];
-                    let file_str = nsstring_to_str(file_name).to_string();
-                    log::debug!("application_open_files {file_str}");
-                    conn.dispatch_app_event(ApplicationEvent::OpenCommandScript(file_str));
-                    dispatched = true;
-                }
+    let mut dispatched = false;
+    unsafe {
+        let count: NSInteger = msg_send![file_names, count];
+        for i in 0..count {
+            let file_name: *mut Object = msg_send![file_names, objectAtIndex: i];
+            let file_str = nsstring_to_str(file_name).to_string();
+            if file_str.is_empty() {
+                continue;
             }
-            if dispatched {
-                reply = NSApplicationDelegateReplySuccess;
-            }
+            log::debug!("application_open_files {file_str}");
+            dispatch_or_queue_service_open(file_str, true);
+            dispatched = true;
         }
+    }
+    if dispatched {
+        reply = NSApplicationDelegateReplySuccess;
     }
 
     unsafe {
@@ -573,6 +639,8 @@ fn first_service_path(pasteboard: *mut Object) -> Option<String> {
 }
 
 fn dispatch_or_queue_service_open(path: String, prefer_existing_window: bool) {
+    note_service_open_request();
+
     if let Some(conn) = Connection::get() {
         let event = if prefer_existing_window {
             ApplicationEvent::OpenCommandScriptInTab(path)
@@ -678,16 +746,32 @@ extern "C" fn application_open_urls(
 
             let raw_url = nsstring_to_str(abs_string).to_string();
             match Url::parse(&raw_url) {
-                Ok(parsed) => match parse_url_action(&parsed) {
-                    Some(("open-tab", tty)) => {
-                        log::debug!("application_open_urls open-tab tty={tty}");
-                        dispatch_or_queue_tty_activation(tty);
+                Ok(parsed) => {
+                    if parsed.scheme() == "file" {
+                        match parsed.to_file_path() {
+                            Ok(path) => {
+                                let path = path.to_string_lossy().into_owned();
+                                log::debug!("application_open_urls file {path}");
+                                dispatch_or_queue_service_open(path, true);
+                            }
+                            Err(_) => {
+                                log::warn!("application_open_urls invalid file url: {raw_url}");
+                            }
+                        }
+                        continue;
                     }
-                    Some((_action, _)) => {}
-                    None => {
-                        log::warn!("application_open_urls unsupported url: {raw_url}");
+
+                    match parse_url_action(&parsed) {
+                        Some(("open-tab", tty)) => {
+                            log::debug!("application_open_urls open-tab tty={tty}");
+                            dispatch_or_queue_tty_activation(tty);
+                        }
+                        Some((_action, _)) => {}
+                        None => {
+                            log::warn!("application_open_urls unsupported url: {raw_url}");
+                        }
                     }
-                },
+                }
                 Err(err) => {
                     log::warn!("application_open_urls invalid url {raw_url}: {err:#}");
                 }
