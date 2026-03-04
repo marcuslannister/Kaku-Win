@@ -6,7 +6,6 @@ use mux::client::ClientId;
 use mux::domain::SplitSource;
 use mux::pane::{CachePolicy, Pane, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
-use mux::tab::TabId;
 use mux::{Mux, MuxNotification};
 use promise::spawn::spawn_into_main_thread;
 use std::collections::HashMap;
@@ -198,7 +197,7 @@ fn maybe_push_pane_changes(
 
 pub struct SessionHandler {
     to_write_tx: PduSender,
-    per_pane: HashMap<TabId, Arc<Mutex<PerPane>>>,
+    per_pane: HashMap<PaneId, Arc<Mutex<PerPane>>>,
     client_id: Option<Arc<ClientId>>,
     proxy_client_id: Option<ClientId>,
 }
@@ -518,7 +517,7 @@ impl SessionHandler {
                 use mux::pane::Pattern;
 
                 async fn do_search(
-                    pane_id: TabId,
+                    pane_id: PaneId,
                     pattern: Pattern,
                     range: std::ops::Range<StableRowIndex>,
                     limit: Option<u32>,

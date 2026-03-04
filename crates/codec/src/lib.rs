@@ -717,7 +717,7 @@ pub struct SendPaste {
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct SendKeyDown {
-    pub pane_id: TabId,
+    pub pane_id: PaneId,
     pub event: termwiz::input::KeyEvent,
     pub input_serial: InputSerial,
 }

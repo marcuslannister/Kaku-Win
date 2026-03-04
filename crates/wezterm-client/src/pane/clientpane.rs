@@ -236,7 +236,7 @@ impl ClientPane {
         Ok(())
     }
 
-    pub fn remote_pane_id(&self) -> TabId {
+    pub fn remote_pane_id(&self) -> PaneId {
         self.remote_pane_id
     }
 
@@ -643,7 +643,7 @@ impl Pane for ClientPane {
 
 struct PaneWriter {
     client: Arc<ClientInner>,
-    remote_pane_id: TabId,
+    remote_pane_id: PaneId,
 }
 
 impl std::io::Write for PaneWriter {

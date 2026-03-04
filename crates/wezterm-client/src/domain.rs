@@ -119,7 +119,7 @@ impl ClientInner {
         None
     }
 
-    pub fn remote_to_local_pane_id(&self, remote_pane_id: PaneId) -> Option<TabId> {
+    pub fn remote_to_local_pane_id(&self, remote_pane_id: PaneId) -> Option<PaneId> {
         let mut pane_map = self.remote_to_local_pane.lock().unwrap();
 
         if let Some(id) = pane_map.get(&remote_pane_id) {
@@ -423,7 +423,7 @@ impl ClientDomain {
         mux.domain_was_detached(self.local_domain_id);
     }
 
-    pub fn remote_to_local_pane_id(&self, remote_pane_id: TabId) -> Option<TabId> {
+    pub fn remote_to_local_pane_id(&self, remote_pane_id: PaneId) -> Option<PaneId> {
         let inner = self.inner()?;
         inner.remote_to_local_pane_id(remote_pane_id)
     }
@@ -522,14 +522,14 @@ impl ClientDomain {
             .keys()
             .copied()
             .collect();
-        let mut remote_tabs_to_forget: HashSet<WindowId> = inner
+        let mut remote_tabs_to_forget: HashSet<TabId> = inner
             .remote_to_local_tab
             .lock()
             .unwrap()
             .keys()
             .copied()
             .collect();
-        let mut remote_panes_to_forget: HashSet<WindowId> = inner
+        let mut remote_panes_to_forget: HashSet<PaneId> = inner
             .remote_to_local_pane
             .lock()
             .unwrap()
