@@ -5,7 +5,6 @@ use crate::termwindow::webgpu::{adapter_info_to_gpu_info, WebGpuState, WebGpuTex
 use ::window::bitmaps::atlas::OutOfTextureSpace;
 use ::window::bitmaps::Texture2d;
 use ::window::glium::backend::Context as GliumContext;
-use ::window::glium::buffer::{BufferMutSlice, Mapping};
 use ::window::glium::{
     CapabilitiesSource, IndexBuffer as GliumIndexBuffer, VertexBuffer as GliumVertexBuffer,
 };
@@ -167,33 +166,90 @@ impl VertexBuffer {
     }
 }
 
-enum MappedVertexBuffer {
-    Glium(GliumMappedVertexBuffer),
-    WebGpu(WebGpuMappedVertexBuffer),
-}
-
-impl MappedVertexBuffer {
-    fn slice_mut(&mut self, range: std::ops::Range<usize>) -> &mut [Vertex] {
-        match self {
-            Self::Glium(g) => &mut g.mapping[range],
-            Self::WebGpu(g) => {
-                let mapping: &mut [Vertex] = bytemuck::cast_slice_mut(&mut g.mapping);
-                &mut mapping[range]
-            }
-        }
-    }
-}
-
-pub struct MappedQuads<'a> {
-    mapping: MappedVertexBuffer,
-    next: RefMut<'a, usize>,
+#[derive(Default)]
+struct StagingLayer {
+    vertices: Vec<Vertex>,
+    next_quad: usize,
     capacity: usize,
 }
 
-pub struct WebGpuMappedVertexBuffer {
-    mapping: wgpu::BufferViewMut<'static>,
-    // Owner mapping, must be dropped after mapping
-    _slice: wgpu::BufferSlice<'static>,
+impl StagingLayer {
+    fn from_vertex_buffer(vb: &TripleVertexBuffer) -> Self {
+        let capacity = vb.capacity;
+        let next_quad = *vb.next_quad.borrow();
+        let copy_len = next_quad.min(capacity) * VERTICES_PER_CELL;
+        let mut vertices = vec![Vertex::default(); copy_len];
+
+        if copy_len > 0 {
+            let mut current = vb.current_vb_mut();
+            match &mut *current {
+                VertexBuffer::Glium(buffer) => {
+                    if let Some(buf_slice) = buffer.slice_mut(0..copy_len) {
+                        let mapping = buf_slice.map();
+                        vertices[..copy_len].copy_from_slice(&mapping[..copy_len]);
+                    }
+                }
+                VertexBuffer::WebGpu(buffer) => {
+                    buffer.read_vertices(&mut vertices[..copy_len]);
+                }
+            }
+        }
+
+        Self {
+            vertices,
+            next_quad,
+            capacity,
+        }
+    }
+
+    fn copy_len(&self) -> usize {
+        self.vertices
+            .len()
+            .min(self.capacity * VERTICES_PER_CELL)
+    }
+}
+
+impl QuadAllocator for StagingLayer {
+    fn allocate<'a>(&'a mut self) -> anyhow::Result<QuadImpl<'a>> {
+        let idx = self.next_quad;
+        self.next_quad += 1;
+        let idx = if idx >= self.capacity {
+            // Keep rendering while tracking overflow. A later pass will
+            // detect the shortfall and grow the GPU buffers.
+            0
+        } else {
+            idx
+        };
+
+        let start = idx * VERTICES_PER_CELL;
+        let end = start + VERTICES_PER_CELL;
+        if self.vertices.len() < end {
+            self.vertices.resize(end, Vertex::default());
+        }
+
+        let mut quad = Quad {
+            vert: &mut self.vertices[start..end],
+        };
+        quad.set_has_color(false);
+        Ok(QuadImpl::Vert(quad))
+    }
+
+    fn extend_with(&mut self, vertices: &[Vertex]) {
+        let idx = self.next_quad;
+        let len = vertices.len();
+
+        self.next_quad += len / VERTICES_PER_CELL;
+        let start = idx * VERTICES_PER_CELL;
+        let capacity = self.capacity * VERTICES_PER_CELL;
+
+        if start + len <= capacity {
+            let end = start + len;
+            if self.vertices.len() < end {
+                self.vertices.resize(end, Vertex::default());
+            }
+            self.vertices[start..end].copy_from_slice(vertices);
+        }
+    }
 }
 
 pub struct WebGpuVertexBuffer {
@@ -223,15 +279,29 @@ impl WebGpuVertexBuffer {
         }
     }
 
-    pub fn map(&self) -> WebGpuMappedVertexBuffer {
-        unsafe {
-            let slice = self.buf.slice(..).extend_lifetime();
-            let mapping = slice.get_mapped_range_mut();
+    pub fn write_vertices(&mut self, vertices: &[Vertex]) {
+        if vertices.is_empty() {
+            return;
+        }
 
-            WebGpuMappedVertexBuffer {
-                mapping,
-                _slice: slice,
-            }
+        let mut mapping = self.buf.slice(..).get_mapped_range_mut();
+        let mapped: &mut [Vertex] = bytemuck::cast_slice_mut(&mut mapping);
+        let copy_len = vertices.len().min(mapped.len());
+        if copy_len > 0 {
+            mapped[..copy_len].copy_from_slice(&vertices[..copy_len]);
+        }
+    }
+
+    pub fn read_vertices(&self, out: &mut [Vertex]) {
+        if out.is_empty() {
+            return;
+        }
+
+        let mapping = self.buf.slice(..).get_mapped_range();
+        let mapped: &[Vertex] = bytemuck::cast_slice(&mapping);
+        let copy_len = out.len().min(mapped.len());
+        if copy_len > 0 {
+            out[..copy_len].copy_from_slice(&mapped[..copy_len]);
         }
     }
 
@@ -272,112 +342,12 @@ impl WebGpuIndexBuffer {
     }
 }
 
-/// This is a self-referential struct, but since those are not possible
-/// to create safely in unstable rust, we transmute the lifetimes away
-/// to static and store the owner (RefMut) and the derived Mapping object
-/// in this struct
-pub struct GliumMappedVertexBuffer {
-    mapping: Mapping<'static, [Vertex]>,
-    // Drop the owner after the mapping
-    _owner: RefMut<'static, VertexBuffer>,
-}
-
-impl<'a> QuadAllocator for MappedQuads<'a> {
-    fn allocate<'b>(&'b mut self) -> anyhow::Result<QuadImpl<'b>> {
-        let idx = *self.next;
-        *self.next += 1;
-        let idx = if idx >= self.capacity {
-            // We don't have enough quads, so we'll keep re-using
-            // the first quad until we reach the end of the render
-            // pass, at which point we'll detect this condition
-            // and re-allocate the quads.
-            0
-        } else {
-            idx
-        };
-
-        let idx = idx * VERTICES_PER_CELL;
-        let mut quad = Quad {
-            vert: self.mapping.slice_mut(idx..idx + VERTICES_PER_CELL),
-        };
-
-        quad.set_has_color(false);
-
-        Ok(QuadImpl::Vert(quad))
-    }
-
-    fn extend_with(&mut self, vertices: &[Vertex]) {
-        let idx = *self.next;
-        let len = vertices.len();
-
-        // idx and next are number of quads, so divide by number of vertices
-        *self.next += len / VERTICES_PER_CELL;
-        // Only copy in if there is enough room.
-        // We'll detect the out of space condition at the end of
-        // the render pass.
-        let idx = idx * VERTICES_PER_CELL;
-        let capacity = self.capacity * VERTICES_PER_CELL;
-        if idx + len <= capacity {
-            self.mapping
-                .slice_mut(idx..idx + len)
-                .copy_from_slice(vertices);
-        }
-    }
-}
-
 pub struct TripleVertexBuffer {
     pub index: RefCell<usize>,
     pub bufs: RefCell<[VertexBuffer; 3]>,
     pub indices: IndexBuffer,
     pub capacity: usize,
     pub next_quad: RefCell<usize>,
-}
-
-/// A trait to avoid broadly-scoped transmutes; we only want to
-/// transmute to extend a lifetime to static, and not to change
-/// the underlying type.
-/// These ExtendStatic trait impls constrain the transmutes in that way,
-/// so that the type checker can still catch issues.
-unsafe trait ExtendStatic {
-    type T;
-    unsafe fn extend_lifetime(self) -> Self::T;
-}
-
-unsafe impl<'a, T: 'static> ExtendStatic for Ref<'a, T> {
-    type T = Ref<'static, T>;
-    unsafe fn extend_lifetime(self) -> Self::T {
-        std::mem::transmute(self)
-    }
-}
-
-unsafe impl<'a, T: 'static> ExtendStatic for RefMut<'a, T> {
-    type T = RefMut<'static, T>;
-    unsafe fn extend_lifetime(self) -> Self::T {
-        std::mem::transmute(self)
-    }
-}
-
-unsafe impl<'a> ExtendStatic for wgpu::BufferSlice<'a> {
-    type T = wgpu::BufferSlice<'static>;
-    unsafe fn extend_lifetime(self) -> Self::T {
-        std::mem::transmute(self)
-    }
-}
-
-unsafe impl<'a> ExtendStatic for MappedQuads<'a> {
-    type T = MappedQuads<'static>;
-    unsafe fn extend_lifetime(self) -> Self::T {
-        std::mem::transmute(self)
-    }
-}
-
-unsafe impl<'a, T: ?Sized + ::window::glium::buffer::Content + 'static> ExtendStatic
-    for BufferMutSlice<'a, T>
-{
-    type T = BufferMutSlice<'static, T>;
-    unsafe fn extend_lifetime(self) -> Self::T {
-        std::mem::transmute(self)
-    }
 }
 
 impl TripleVertexBuffer {
@@ -399,47 +369,32 @@ impl TripleVertexBuffer {
         (num_quads * VERTICES_PER_CELL, num_quads * INDICES_PER_CELL)
     }
 
-    pub fn map(&self) -> MappedQuads<'_> {
-        let mut bufs = self.current_vb_mut();
+    fn apply_staging(&self, layer: &StagingLayer) {
+        *self.next_quad.borrow_mut() = layer.next_quad;
 
-        // To map the vertex buffer, we need to hold a mutable reference to
-        // the buffer and hold the mapping object alive for the duration
-        // of the access.  Rust doesn't allow us to create a struct that
-        // holds both of those things, because one references the other
-        // and it doesn't permit self-referential structs.
-        // We use the very blunt instrument "transmute" to force Rust to
-        // treat the lifetimes of both of these things as static, which
-        // we can then store in the same struct.
-        // This is "safe" because we carry them around together and ensure
-        // that the owner is dropped after the derived data.
-        let mapping = match &mut *bufs {
-            VertexBuffer::Glium(vb) => {
-                let buf_slice = unsafe {
-                    vb.slice_mut(..)
-                        .expect("to map vertex buffer")
-                        .extend_lifetime()
-                };
-                let mapping = buf_slice.map();
+        let copy_len = layer.copy_len();
+        if copy_len == 0 {
+            return;
+        }
 
-                MappedVertexBuffer::Glium(GliumMappedVertexBuffer {
-                    _owner: bufs,
-                    mapping,
-                })
+        let mut vb = self.current_vb_mut();
+        match &mut *vb {
+            VertexBuffer::Glium(buffer) => {
+                if let Some(buf_slice) = buffer.slice_mut(0..copy_len) {
+                    let mut mapping = buf_slice.map();
+                    mapping.copy_from_slice(&layer.vertices[..copy_len]);
+                }
             }
-            VertexBuffer::WebGpu(vb) => MappedVertexBuffer::WebGpu(vb.map()),
-        };
-
-        MappedQuads {
-            mapping,
-            next: self.next_quad.borrow_mut(),
-            capacity: self.capacity,
+            VertexBuffer::WebGpu(buffer) => {
+                buffer.write_vertices(&layer.vertices[..copy_len]);
+            }
         }
     }
 
-    pub fn current_vb_mut(&self) -> RefMut<'static, VertexBuffer> {
+    pub fn current_vb_mut(&self) -> RefMut<'_, VertexBuffer> {
         let index = *self.index.borrow();
         let bufs = self.bufs.borrow_mut();
-        unsafe { RefMut::map(bufs, |bufs| &mut bufs[index]).extend_lifetime() }
+        RefMut::map(bufs, |bufs| &mut bufs[index])
     }
 
     pub fn next_index(&self) {
@@ -479,20 +434,7 @@ impl RenderLayer {
     }
 
     pub fn quad_allocator(&self) -> TripleLayerQuadAllocator<'_> {
-        // We're creating a self-referential struct here to manage the lifetimes
-        // of these related items.  The transmutes are safe because we're only
-        // transmuting the lifetimes (not the types), and we're keeping hold
-        // of the owner in the returned struct.
-        unsafe {
-            let vbs = self.vb.borrow().extend_lifetime();
-            let layer0 = vbs[0].map().extend_lifetime();
-            let layer1 = vbs[1].map().extend_lifetime();
-            let layer2 = vbs[2].map().extend_lifetime();
-            TripleLayerQuadAllocator::Gpu(BorrowedLayers {
-                layers: [layer0, layer1, layer2],
-                _owner: vbs,
-            })
-        }
+        TripleLayerQuadAllocator::Gpu(BorrowedLayers::new(self.vb.borrow()))
     }
 
     pub fn need_more_quads(&self, vb_idx: usize) -> Option<usize> {
@@ -553,20 +495,48 @@ impl RenderLayer {
     }
 }
 
-pub struct BorrowedLayers {
-    pub layers: [MappedQuads<'static>; 3],
-
-    // layers references _owner, so it must be dropped after layers.
-    _owner: Ref<'static, [TripleVertexBuffer; 3]>,
+pub struct BorrowedLayers<'a> {
+    layers: [StagingLayer; 3],
+    owner: Ref<'a, [TripleVertexBuffer; 3]>,
 }
 
-impl TripleLayerQuadAllocatorTrait for BorrowedLayers {
+impl<'a> BorrowedLayers<'a> {
+    fn new(owner: Ref<'a, [TripleVertexBuffer; 3]>) -> Self {
+        Self {
+            layers: [
+                StagingLayer::from_vertex_buffer(&owner[0]),
+                StagingLayer::from_vertex_buffer(&owner[1]),
+                StagingLayer::from_vertex_buffer(&owner[2]),
+            ],
+            owner,
+        }
+    }
+
+    fn layer_mut(&mut self, layer_num: usize) -> &mut StagingLayer {
+        match layer_num {
+            0 => &mut self.layers[0],
+            1 => &mut self.layers[1],
+            2 => &mut self.layers[2],
+            _ => unreachable!("invalid layer index {}", layer_num),
+        }
+    }
+}
+
+impl Drop for BorrowedLayers<'_> {
+    fn drop(&mut self) {
+        for (idx, layer) in self.layers.iter().enumerate() {
+            self.owner[idx].apply_staging(layer);
+        }
+    }
+}
+
+impl TripleLayerQuadAllocatorTrait for BorrowedLayers<'_> {
     fn allocate(&mut self, layer_num: usize) -> anyhow::Result<QuadImpl<'_>> {
-        self.layers[layer_num].allocate()
+        self.layer_mut(layer_num).allocate()
     }
 
     fn extend_with(&mut self, layer_num: usize, vertices: &[Vertex]) {
-        self.layers[layer_num].extend_with(vertices)
+        self.layer_mut(layer_num).extend_with(vertices)
     }
 }
 

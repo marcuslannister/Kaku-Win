@@ -75,10 +75,17 @@ impl Connection {
         let mut prom = promise::Promise::new();
         let future = prom.get_future().unwrap();
         promise::spawn::spawn_into_main_thread(async move {
-            if let Some(handle) = Connection::get().unwrap().window_by_id(window_id) {
-                let mut inner = handle.borrow_mut();
-                prom.result(f(&mut inner));
-            }
+            let result = match Connection::get() {
+                Some(conn) => match conn.window_by_id(window_id) {
+                    Some(handle) => {
+                        let mut inner = handle.borrow_mut();
+                        f(&mut inner)
+                    }
+                    None => Err(anyhow::anyhow!("invalid window id {}", window_id)),
+                },
+                None => Err(anyhow::anyhow!("window connection is not initialized")),
+            };
+            prom.result(result);
         })
         .detach();
 

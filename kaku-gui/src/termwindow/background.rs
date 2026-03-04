@@ -1,6 +1,6 @@
 use crate::color::LinearRgba;
 use crate::glyphcache::LoadState;
-use crate::quad::{QuadAllocator, QuadTrait};
+use crate::quad::{QuadTrait, TripleLayerQuadAllocatorTrait};
 use crate::termwindow::RenderState;
 use crate::utilsprites::RenderMetrics;
 use crate::Dimensions;
@@ -434,8 +434,7 @@ impl crate::TermWindow {
         top: StableRowIndex,
     ) -> anyhow::Result<bool> {
         let render_layer = gl_state.layer_for_zindex(layer_index)?;
-        let vbs = render_layer.vb.borrow();
-        let mut layer0 = vbs[0].map();
+        let mut layers = render_layer.quad_allocator();
 
         let color = bg_color.mul_alpha(layer.def.opacity);
 
@@ -573,7 +572,7 @@ impl crate::TermWindow {
                     break;
                 }
                 let origin_x = origin_x + offset_x;
-                let mut quad = layer0.allocate()?;
+                let mut quad = layers.allocate(0)?;
                 emitted = true;
                 // log::info!("quad {origin_x},{origin_y} {width}x{height}");
                 quad.set_position(origin_x, origin_y, origin_x + width, origin_y + height);

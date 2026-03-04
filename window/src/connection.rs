@@ -44,12 +44,18 @@ pub trait ConnectionOps {
     fn name(&self) -> String;
 
     fn set_event_handler(&self, func: fn(ApplicationEvent)) {
-        let mut handler = EVENT_HANDLER.lock().unwrap();
+        let mut handler = EVENT_HANDLER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         *handler = func;
     }
 
     fn dispatch_app_event(&self, event: ApplicationEvent) {
-        let func = EVENT_HANDLER.lock().unwrap();
+        // Copy the function pointer while holding the lock, then invoke it
+        // after unlocking to avoid lock reentry from callback code.
+        let func = *EVENT_HANDLER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         func(event);
     }
 

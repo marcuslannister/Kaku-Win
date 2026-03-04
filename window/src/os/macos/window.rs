@@ -13,7 +13,7 @@ use crate::{
     RawKeyEvent, Rect, RequestedWindowGeometry, ResizeIncrement, ResolvedGeometry, ScreenPoint,
     Size, ULength, WindowDecorations, WindowEvent, WindowEventSender, WindowOps, WindowState,
 };
-use anyhow::{anyhow, bail, ensure};
+use anyhow::{anyhow, ensure};
 use async_trait::async_trait;
 use cocoa::appkit::{
     self, CGFloat, NSApplication, NSApplicationActivateIgnoringOtherApps,
@@ -192,7 +192,7 @@ impl GlContextPair {
                 let _: () = msg_send![layer, setOpaque: NO];
             };
 
-            let conn = Connection::get().unwrap();
+            let conn = Connection::get().ok_or_else(|| anyhow!("connection not initialized"))?;
 
             let state = match conn.gl_connection.borrow().as_ref() {
                 None => crate::egl::GlState::create(None, layer as *const c_void),
@@ -450,12 +450,7 @@ fn function_key_to_keycode(function_key: char) -> KeyCode {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Window {
     id: usize,
-    ns_window: *mut Object,
-    ns_view: *mut Object,
 }
-
-unsafe impl Send for Window {}
-unsafe impl Sync for Window {}
 
 fn set_window_position(window: *mut Object, coords: ScreenPoint) {
     unsafe {
@@ -1022,8 +1017,6 @@ impl Window {
             let weak_window = window.weak();
             let window_handle = Window {
                 id: window_id,
-                ns_window: *window,
-                ns_view: *view,
             };
             let window_inner = Rc::new(RefCell::new(WindowInner {
                 window,
@@ -1058,6 +1051,21 @@ impl Window {
             Ok(window_handle)
         }
     }
+
+    fn with_window_inner<R>(&self, f: impl FnOnce(&WindowInner) -> R) -> Option<R> {
+        let conn = Connection::get()?;
+        let handle = conn.window_by_id(self.id)?;
+        let inner = handle.borrow();
+        Some(f(&inner))
+    }
+
+    fn ns_view(&self) -> Option<*mut Object> {
+        self.with_window_inner(|inner| *inner.view)
+    }
+
+    fn ns_window(&self) -> Option<*mut Object> {
+        self.with_window_inner(|inner| *inner.window)
+    }
 }
 
 impl HasDisplayHandle for Window {
@@ -1072,8 +1080,8 @@ impl HasDisplayHandle for Window {
 
 impl HasWindowHandle for Window {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let handle =
-            AppKitWindowHandle::new(NonNull::new(self.ns_view as *mut _).expect("non-null"));
+        let ns_view = self.ns_view().ok_or(HandleError::Unavailable)?;
+        let handle = AppKitWindowHandle::new(NonNull::new(ns_view as *mut _).expect("non-null"));
         unsafe { Ok(WindowHandle::borrow_raw(RawWindowHandle::AppKit(handle))) }
     }
 }
@@ -1103,12 +1111,12 @@ impl WindowOps for Window {
     async fn enable_opengl(&self) -> anyhow::Result<Rc<glium::backend::Context>> {
         let window_id = self.id;
         promise::spawn::spawn(async move {
-            if let Some(handle) = Connection::get().unwrap().window_by_id(window_id) {
-                let mut inner = handle.borrow_mut();
-                inner.enable_opengl()
-            } else {
-                bail!("invalid window");
-            }
+            let conn = Connection::get().ok_or_else(|| anyhow!("connection not initialized"))?;
+            let handle = conn
+                .window_by_id(window_id)
+                .ok_or_else(|| anyhow!("invalid window"))?;
+            let mut inner = handle.borrow_mut();
+            inner.enable_opengl()
         })
         .await
     }
@@ -1300,32 +1308,39 @@ impl WindowOps for Window {
         // systems with a notch.
         // We only need this for non-native full screen mode.
 
-        let native_full_screen = {
-            let style_mask = unsafe { NSWindow::styleMask(self.ns_window) };
-            style_mask.contains(NSWindowStyleMask::NSFullScreenWindowMask)
-        };
+        let native_full_screen = self
+            .ns_window()
+            .map(|ns_window| {
+                let style_mask = unsafe { NSWindow::styleMask(ns_window) };
+                style_mask.contains(NSWindowStyleMask::NSFullScreenWindowMask)
+            })
+            .unwrap_or(false);
 
         // For simple fullscreen, window_state may lag one frame behind the style/frame update.
         // Track the state in WindowView::simple_fullscreen_active (Cell<bool>) so we can
         // read it without borrowing the RefCell and avoid borrow conflicts during resize.
-        let simple_full_screen = unsafe {
-            WindowView::get_this(&*self.ns_view)
-                .map(|view| view.simple_fullscreen_active.get())
-                .unwrap_or(false)
-        };
+        let simple_full_screen = self
+            .ns_view()
+            .and_then(|ns_view| unsafe { WindowView::get_this(&*ns_view) })
+            .map(|view| view.simple_fullscreen_active.get())
+            .unwrap_or(false);
 
         let should_apply_notch_padding = simple_full_screen
             && !native_full_screen
             && !config.macos_fullscreen_extend_behind_notch;
 
         let border_dimensions = if should_apply_notch_padding {
-            let screen = unsafe {
-                let window_screen: id = msg_send![self.ns_window, screen];
-                if window_screen.is_null() {
-                    NSScreen::mainScreen(nil)
-                } else {
-                    window_screen
+            let screen = if let Some(ns_window) = self.ns_window() {
+                unsafe {
+                    let window_screen: id = msg_send![ns_window, screen];
+                    if window_screen.is_null() {
+                        NSScreen::mainScreen(nil)
+                    } else {
+                        window_screen
+                    }
                 }
+            } else {
+                unsafe { NSScreen::mainScreen(nil) }
             };
 
             if screen.is_null() {
@@ -1369,23 +1384,25 @@ impl WindowOps for Window {
     }
 
     fn is_zoom_animation_active(&self) -> bool {
-        unsafe {
-            if let Some(view) = WindowView::get_this(&*self.ns_view) {
-                if view.native_fullscreen_transition_active.get() {
-                    match view.native_fullscreen_target.get() {
-                        // Enter fullscreen: keep hidden for whole transition to avoid text scale pop.
-                        Some(true) => return true,
-                        // Exit fullscreen: avoid showing a rectangular placeholder
-                        // during the restore animation.
-                        Some(false) => view.transition_hide_until.set(None),
-                        None => return true,
+        if let Some(ns_view) = self.ns_view() {
+            unsafe {
+                if let Some(view) = WindowView::get_this(&*ns_view) {
+                    if view.native_fullscreen_transition_active.get() {
+                        match view.native_fullscreen_target.get() {
+                            // Enter fullscreen: keep hidden for whole transition to avoid text scale pop.
+                            Some(true) => return true,
+                            // Exit fullscreen: avoid showing a rectangular placeholder
+                            // during the restore animation.
+                            Some(false) => view.transition_hide_until.set(None),
+                            None => return true,
+                        }
                     }
-                }
-                if let Some(until) = view.transition_hide_until.get() {
-                    if Instant::now() < until {
-                        return true;
+                    if let Some(until) = view.transition_hide_until.get() {
+                        if Instant::now() < until {
+                            return true;
+                        }
+                        view.transition_hide_until.set(None);
                     }
-                    view.transition_hide_until.set(None);
                 }
             }
         }
@@ -3136,11 +3153,13 @@ impl WindowView {
 
     extern "C" fn view_did_change_effective_appearance(this: &mut Object, _sel: Sel) {
         if let Some(this) = Self::get_this(this) {
-            let appearance = Connection::get().unwrap().get_appearance();
-            this.inner
-                .borrow_mut()
-                .events
-                .dispatch(WindowEvent::AppearanceChanged(appearance));
+            if let Some(conn) = Connection::get() {
+                let appearance = conn.get_appearance();
+                this.inner
+                    .borrow_mut()
+                    .events
+                    .dispatch(WindowEvent::AppearanceChanged(appearance));
+            }
         }
     }
 
@@ -3315,7 +3334,7 @@ impl WindowView {
         Self::cancel_pending_perform_requests(this as *mut Object);
         Self::detach_backing_layer(this);
         if let Some(this) = Self::get_this(this) {
-            let conn = Connection::get().unwrap();
+            let conn = Connection::get();
             if !APP_TERMINATING.load(Ordering::Relaxed) {
                 if let Some(window) = this.inner.borrow().window.as_ref() {
                     let window = window.load();
@@ -3332,7 +3351,9 @@ impl WindowView {
                 .dispatch(WindowEvent::Destroyed);
             this.update_application_presentation(false);
             let window_id = this.inner.borrow_mut().window_id;
-            conn.windows.borrow_mut().remove(&window_id);
+            if let Some(conn) = conn {
+                conn.windows.borrow_mut().remove(&window_id);
+            }
         }
     }
 
