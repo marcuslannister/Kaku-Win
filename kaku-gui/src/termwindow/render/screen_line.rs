@@ -5,13 +5,12 @@ use crate::termwindow::render::{
     RenderScreenLineParams, RenderScreenLineResult,
 };
 use crate::termwindow::LineToElementShapeItem;
-use ::window::DeadKeyStatus;
 use anyhow::Context;
 use config::{HsbTransform, TextStyle};
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
-use termwiz::cell::{unicode_column_width, Blink};
+use termwiz::cell::Blink;
 use termwiz::color::LinearRgba;
 use termwiz::surface::CursorShape;
 use wezterm_bidi::Direction;
@@ -66,35 +65,8 @@ impl crate::TermWindow {
 
         let start = Instant::now();
 
-        let cursor_idx = if params.pane.is_some()
-            && params.is_active
-            && params.stable_line_idx == Some(params.cursor.y)
-        {
-            Some(params.cursor.x)
-        } else {
-            None
-        };
-
-        // Referencing the text being composed, but only if it belongs to this pane
-        let composing = if cursor_idx.is_some() {
-            if let DeadKeyStatus::Composing(composing) = &self.dead_key_status {
-                Some(composing)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let mut composition_width = 0;
-
         let (_bidi_enabled, bidi_direction) = params.line.bidi_info();
         let direction = bidi_direction.direction();
-
-        // Do we need to shape immediately, or can we use the pre-shaped data?
-        if let Some(composing) = composing {
-            composition_width = unicode_column_width(composing, None);
-        }
 
         let cursor_cell = if params.stable_line_idx == Some(params.cursor.y) {
             params.line.get_cell(params.cursor.x)
@@ -102,9 +74,7 @@ impl crate::TermWindow {
             None
         };
 
-        let cursor_range = if composition_width > 0 {
-            params.cursor.x..params.cursor.x + composition_width
-        } else if params.stable_line_idx == Some(params.cursor.y) {
+        let cursor_range = if params.stable_line_idx == Some(params.cursor.y) {
             params.cursor.x..params.cursor.x + cursor_cell.as_ref().map(|c| c.width()).unwrap_or(1)
         } else {
             0..0

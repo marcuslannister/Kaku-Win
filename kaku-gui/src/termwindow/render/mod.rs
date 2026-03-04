@@ -564,10 +564,33 @@ impl crate::TermWindow {
                 };
             }
 
-            let dead_key_or_leader =
-                self.dead_key_status != DeadKeyStatus::None || self.leader_is_active();
+            let dead_key_active = self.dead_key_status != DeadKeyStatus::None;
 
-            if dead_key_or_leader && params.is_active_pane {
+            if dead_key_active && params.is_active_pane {
+                let fg_color = self.ensure_min_contrast(params.fg_color, params.bg_color);
+
+                let color = params
+                    .config
+                    .resolved_palette
+                    .compose_cursor
+                    .map(|c| c.to_linear())
+                    .unwrap_or(params.cursor_border_color);
+
+                return ComputeCellFgBgResult {
+                    fg_color,
+                    fg_color_alt: fg_color,
+                    fg_color_mix: 0.,
+                    bg_color: params.bg_color,
+                    bg_color_alt: params.bg_color,
+                    bg_color_mix: 0.,
+                    cursor_shape: Some(CursorShape::SteadyUnderline),
+                    cursor_border_color: color,
+                    cursor_border_color_alt: color,
+                    cursor_border_mix: 0.,
+                };
+            }
+
+            if self.leader_is_active() && params.is_active_pane {
                 let (fg_color, bg_color) = if self.use_reverse_video_cursor(&params) {
                     (params.bg_color, params.fg_color)
                 } else {
