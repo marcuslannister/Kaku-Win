@@ -38,78 +38,6 @@ fi
 SETUP_SCRIPT="$RESOURCES_DIR/setup_zsh.sh"
 TOOLS_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
 
-# Clear screen
-clear
-
-# Display Welcome Message
-echo -e "\033[1;35m"
-echo "  _  __      _          "
-echo " | |/ /     | |         "
-echo " | ' / __ _ | | __ _   _ "
-echo " |  < / _\` || |/ /| | | |"
-echo " | . \ (_| ||   < | |_| |"
-echo " |_|\_\__,_||_|\_\ \__,_|"
-echo -e "\033[0m"
-echo "Welcome to Kaku!"
-echo "A fast, out-of-the-box terminal built for AI coding."
-echo "--------------------------------------------------------"
-echo "Would you like to install Kaku's enhanced shell features?"
-echo "This includes:"
-echo "  - z - Smart Directory Jumper"
-echo "  - zsh-completions - Rich Tab Completions"
-echo "  - Zsh Syntax Highlighting"
-echo "  - Zsh Autosuggestions"
-echo "  - Optional CLI tools via Homebrew: Starship, Delta, Lazygit, Yazi"
-echo ""
-echo "Shell config model:"
-echo "  - Kaku writes managed shell config to ~/.config/kaku/zsh/kaku.zsh"
-echo "  - .zshrc only gets one source line"
-echo "  - You can roll back anytime with: kaku reset"
-echo "--------------------------------------------------------"
-echo ""
-
-# Interactive Prompt
-read -p "Install enhanced shell features? [Y/n] " -n 1 -r
-echo ""
-
-INSTALL_SHELL=false
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-	INSTALL_SHELL=true
-fi
-
-# Kaku Theme Prompt
-echo "--------------------------------------------------------"
-echo "Would you like to use the Kaku Theme?"
-echo "A modern, high-contrast dark theme optimized for AI coding."
-echo "Perfect for Claude, Codex, and late-night hacking."
-echo "--------------------------------------------------------"
-read -p "Apply Kaku Theme? [Y/n] " -n 1 -r
-echo ""
-
-INSTALL_THEME=false
-if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
-	INSTALL_THEME=true
-fi
-
-# Process Shell Features
-if [[ "$INSTALL_SHELL" == "true" ]]; then
-	if [[ -f "$SETUP_SCRIPT" ]]; then
-		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$SETUP_SCRIPT"; then
-			echo ""
-			echo "Warning: shell setup failed. You can retry manually:"
-			echo "  bash \"$SETUP_SCRIPT\""
-		fi
-	else
-		echo "Error: setup_zsh.sh not found at $SETUP_SCRIPT"
-	fi
-else
-	echo ""
-	echo "Skipping shell setup. You can run it manually later:"
-	echo "$SETUP_SCRIPT"
-fi
-
-mkdir -p "$CONFIG_DIR"
-
 resolve_kaku_cli() {
 	local candidates=(
 		"$RESOURCES_DIR/../MacOS/kaku"
@@ -132,6 +60,84 @@ resolve_kaku_cli() {
 
 	return 1
 }
+
+# Clear screen
+clear
+
+# Display Welcome Message
+echo -e "\033[1;35m"
+echo "  _  __      _          "
+echo " | |/ /     | |         "
+echo " | ' / __ _ | | __ _   _ "
+echo " |  < / _\` || |/ /| | | |"
+echo " | . \ (_| ||   < | |_| |"
+echo " |_|\_\__,_||_|\_\ \__,_|"
+echo -e "\033[0m"
+echo "Welcome to Kaku!"
+echo "A fast, out-of-the-box terminal built for AI coding."
+echo "--------------------------------------------------------"
+echo "Would you like to install Kaku's enhanced shell features?"
+echo "This includes:"
+echo "  - z - Smart Directory Jumper"
+echo "  - zsh-completions - Rich Tab Completions"
+echo "  - Zsh Syntax Highlighting"
+echo "  - Zsh Autosuggestions"
+echo "  - Kaku Theme"
+echo "  - Optional CLI tools via Homebrew: Starship, Delta, Lazygit, Yazi"
+echo "  - If Homebrew is missing, Kaku can offer to install it"
+echo ""
+echo "Shell config model:"
+echo "  - Kaku writes managed shell config to ~/.config/kaku/zsh/kaku.zsh"
+echo "  - .zshrc only gets one source line"
+echo "  - You can roll back anytime with: kaku reset"
+echo "--------------------------------------------------------"
+echo ""
+
+# Interactive Prompt
+read -p "Set up Kaku now? Press Enter to continue, type n to skip: " -n 1 -r
+echo ""
+
+INSTALL_SHELL=false
+if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+	INSTALL_SHELL=true
+fi
+
+INSTALL_THEME="$INSTALL_SHELL"
+
+# Process Shell Features
+if [[ "$INSTALL_SHELL" == "true" ]]; then
+	if kaku_bin="$(resolve_kaku_cli)"; then
+		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 "$kaku_bin" init; then
+			echo ""
+			echo "Warning: shell setup failed. You can retry manually:"
+			echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 \"$kaku_bin\" init"
+			if [[ -f "$SETUP_SCRIPT" ]]; then
+				echo "Fallback:"
+				echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 bash \"$SETUP_SCRIPT\""
+			fi
+		fi
+	elif [[ -f "$SETUP_SCRIPT" ]]; then
+		echo ""
+		echo "Warning: Kaku CLI not found during first-run setup. Falling back to setup_zsh.sh."
+		if ! KAKU_SKIP_TOOL_BOOTSTRAP=1 bash "$SETUP_SCRIPT"; then
+			echo ""
+			echo "Warning: shell setup failed. You can retry manually:"
+			echo "  KAKU_SKIP_TOOL_BOOTSTRAP=1 bash \"$SETUP_SCRIPT\""
+		fi
+	else
+		echo "Error: neither kaku CLI nor setup_zsh.sh was found for shell setup."
+	fi
+else
+	echo ""
+	echo "Skipping shell setup. You can run it manually later:"
+	if kaku_bin="$(resolve_kaku_cli)"; then
+		echo "  \"$kaku_bin\" init"
+	elif [[ -f "$SETUP_SCRIPT" ]]; then
+		echo "  bash \"$SETUP_SCRIPT\""
+	fi
+fi
+
+mkdir -p "$CONFIG_DIR"
 
 ensure_user_config_via_cli() {
 	local kaku_lua_dest="$HOME/.config/kaku/kaku.lua"

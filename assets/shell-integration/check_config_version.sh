@@ -88,7 +88,7 @@ case "$CURRENT_CONFIG_VERSION" in
 esac
 echo ""
 
-read -p "Apply update? [Y/n] " -n 1 -r
+read -p "Apply update now? Press Enter to continue, type n to skip: " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Nn]$ ]]; then

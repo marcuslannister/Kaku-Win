@@ -30,14 +30,66 @@ resolve_brew_bin() {
 	return 1
 }
 
+prompt_install_homebrew() {
+	if [[ ! -t 0 || ! -t 1 ]]; then
+		return 1
+	fi
+
+	echo ""
+	echo "Homebrew is required to install Kaku's optional CLI tools:"
+	if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
+		echo "  ${MISSING_TOOLS[*]}"
+	fi
+	read -p "Install Homebrew now? Press Enter to continue, type n to skip: " -n 1 -r
+	echo
+
+	if [[ $REPLY =~ ^[Nn]$ ]]; then
+		return 1
+	fi
+
+	return 0
+}
+
+install_homebrew() {
+	if ! command -v curl >/dev/null 2>&1; then
+		echo -e "${YELLOW}curl not found. Cannot install Homebrew automatically.${NC}"
+		return 1
+	fi
+
+	echo -e "${BOLD}Installing Homebrew...${NC}"
+	if ! /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+		echo -e "${YELLOW}Homebrew installation failed.${NC}"
+		return 1
+	fi
+
+	if BREW_BIN="$(resolve_brew_bin)"; then
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Homebrew${NC}    Installed successfully"
+		return 0
+	fi
+
+	echo -e "${YELLOW}Homebrew installation finished, but brew was not found in PATH or standard locations.${NC}"
+	return 1
+}
+
 ensure_homebrew_installation() {
 	if BREW_BIN="$(resolve_brew_bin)"; then
 		return 0
 	fi
 
 	echo -e "${YELLOW}Homebrew not found.${NC}"
-	echo "Install Homebrew first, then rerun initialization:"
-	echo "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+	if prompt_install_homebrew && install_homebrew; then
+		return 0
+	fi
+
+	echo -e "${YELLOW}Skipping optional CLI tools.${NC}"
+	if [[ ${#MISSING_TOOLS[@]} -gt 0 ]]; then
+		echo "Missing optional tools: ${MISSING_TOOLS[*]}"
+	fi
+	echo "Kaku shell integration will continue without them."
+	echo "Install Homebrew later, then refresh optional tools with:"
+	echo "  kaku init --update-only"
+	echo "Homebrew install guide:"
+	echo "  https://brew.sh"
 	return 1
 }
 
@@ -166,7 +218,7 @@ install_missing_tools() {
 			for tool in "${MISSING_TOOLS[@]}"; do
 				echo "  - $tool"
 			done
-			read -p "Install missing tools now? [Y/n] " -n 1 -r
+			read -p "Install missing tools now? Press Enter to continue, type n to skip: " -n 1 -r
 			echo
 			if [[ $REPLY =~ ^[Nn]$ ]]; then
 				return 0
