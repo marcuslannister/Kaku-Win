@@ -109,6 +109,22 @@ check_release_config() {
     "$REPO_ROOT/scripts/check_release_config.sh"
 }
 
+extract_release_title() {
+    local release_notes_file="$REPO_ROOT/.github/RELEASE_NOTES.md"
+    local title
+
+    if [[ ! -f "$release_notes_file" ]]; then
+        return 1
+    fi
+
+    title=$(awk '/^# / { sub(/^# /, ""); print; exit }' "$release_notes_file")
+    if [[ -z "$title" ]]; then
+        return 1
+    fi
+
+    printf '%s\n' "$title"
+}
+
 # Check gh CLI is authenticated
 check_gh_auth() {
     log_info "Checking GitHub CLI authentication..."
@@ -237,15 +253,34 @@ notarize_release() {
 create_tag() {
     local version="$1"
     local tag="V${version}"
+    local head_sha
+    local tag_sha
+    local remote_tag_sha
 
     log_info "Creating tag $tag..."
+    head_sha=$(git rev-parse HEAD)
 
-    # Check if tag already exists
-    if git rev-parse "$tag" >/dev/null 2>&1; then
-        die "Tag $tag already exists. Delete it or use a different version."
+    if git show-ref --verify --quiet "refs/tags/$tag"; then
+        tag_sha=$(git rev-parse "$tag^{}")
+        if [[ "$tag_sha" != "$head_sha" ]]; then
+            die "Tag $tag already exists at $tag_sha, but HEAD is $head_sha."
+        fi
+
+        log_warn "Tag $tag already exists at current HEAD, reusing it."
+    else
+        git tag -a "$tag" -m "Release $tag"
     fi
 
-    git tag -a "$tag" -m "Release $tag"
+    remote_tag_sha=$(git ls-remote --tags origin "refs/tags/${tag}^{}" | awk 'NR == 1 { print $1 }')
+    if [[ -n "$remote_tag_sha" ]]; then
+        if [[ "$remote_tag_sha" != "$head_sha" ]]; then
+            die "Origin already has tag $tag at $remote_tag_sha, but HEAD is $head_sha."
+        fi
+
+        log_warn "Origin already has tag $tag at current HEAD, skipping push."
+        return 0
+    fi
+
     log_info "Pushing tag $tag..."
     git push origin "$tag"
 }
@@ -254,11 +289,11 @@ create_tag() {
 create_github_release() {
     local version="$1"
     local tag="V${version}"
-
-    log_info "Creating GitHub Release for $tag..."
-
     local release_notes_file="$REPO_ROOT/.github/RELEASE_NOTES.md"
+    local release_title="$APP_NAME $tag"
     local notes_arg=""
+    local release_edit_args=()
+    local release_title_from_notes=""
 
     if [[ -f "$release_notes_file" ]]; then
         # Extract just the changelog section (between ### Changelog and ### 更新日志)
@@ -273,9 +308,24 @@ create_github_release() {
         notes_arg="--generate-notes"
     fi
 
+    if release_title_from_notes=$(extract_release_title); then
+        release_title="$release_title_from_notes"
+    fi
+
+    log_info "Creating GitHub Release for $tag..."
+
+    if [[ "$notes_arg" == "--notes-file" ]]; then
+        release_edit_args=(--title "$release_title" "$notes_arg" "$release_notes_file")
+    else
+        release_edit_args=(--title "$release_title")
+    fi
+
     # Check if release already exists
     if gh release view "$tag" -R "$GITHUB_REPO" >/dev/null 2>&1; then
-        log_warn "Release $tag already exists, updating assets..."
+        log_warn "Release $tag already exists, reconciling title, notes, and assets..."
+        gh release edit "$tag" \
+            -R "$GITHUB_REPO" \
+            "${release_edit_args[@]}"
         gh release upload "$tag" \
             -R "$GITHUB_REPO" \
             "$OUT_DIR/Kaku.dmg" \
@@ -289,7 +339,7 @@ create_github_release() {
                 "$OUT_DIR/Kaku.dmg" \
                 "$OUT_DIR/kaku_for_update.zip" \
                 "$OUT_DIR/kaku_for_update.zip.sha256" \
-                --title "$APP_NAME $tag" \
+                --title "$release_title" \
                 "$notes_arg" "$release_notes_file"
         else
             gh release create "$tag" \
@@ -297,7 +347,7 @@ create_github_release() {
                 "$OUT_DIR/Kaku.dmg" \
                 "$OUT_DIR/kaku_for_update.zip" \
                 "$OUT_DIR/kaku_for_update.zip.sha256" \
-                --title "$APP_NAME $tag" \
+                --title "$release_title" \
                 --generate-notes
         fi
     fi
@@ -310,6 +360,9 @@ update_homebrew_tap() {
     local version="$1"
     local token=""
     local dmg_sha256
+    local dispatch_output
+    local workflow_url="https://github.com/${HOMEBREW_TAP_REPO}/actions/workflows/bump.yml"
+    local latest_run_url=""
 
     # Try to get token: env var > gh auth token
     if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
@@ -333,20 +386,34 @@ update_homebrew_tap() {
     log_info "Dispatching Homebrew tap update..."
 
     # Dispatch workflow to update Homebrew tap
-    GH_TOKEN="$token" gh api \
+    if ! dispatch_output=$(
+        GH_TOKEN="$token" gh api \
         --method POST \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
         "/repos/${HOMEBREW_TAP_REPO}/dispatches" \
         -f "event_type=kaku_release_published" \
         -f "client_payload[version]=$version" \
-        -f "client_payload[sha256]=$dmg_sha256" \
-        2>/dev/null || {
+        -f "client_payload[sha256]=$dmg_sha256" 2>&1
+    ); then
         log_warn "Failed to dispatch Homebrew tap update for ${HOMEBREW_TAP_REPO}"
+        log_warn "$dispatch_output"
+        log_warn "Track the workflow here: $workflow_url"
         return 0
-    }
+    fi
 
     log_info "Homebrew tap update dispatched"
+    log_info "Track the workflow here: $workflow_url"
+
+    latest_run_url=$(gh run list \
+        -R "$HOMEBREW_TAP_REPO" \
+        --workflow bump.yml \
+        --limit 1 \
+        --json url,status,displayTitle,event \
+        --jq '.[] | select(.displayTitle=="kaku_release_published" and .event=="repository_dispatch") | .url' 2>/dev/null || true)
+    if [[ -n "$latest_run_url" ]]; then
+        log_info "Latest Homebrew tap run: $latest_run_url"
+    fi
 }
 
 # Main release flow
