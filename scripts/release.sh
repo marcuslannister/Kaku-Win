@@ -28,6 +28,8 @@ PROFILE="${PROFILE:-release-opt}"
 BUILD_ARCH="${BUILD_ARCH:-universal}"
 RUN_CLIPPY="${RUN_CLIPPY:-0}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
+GITHUB_REPO="${GITHUB_REPO:-tw93/Kaku}"
+HOMEBREW_TAP_REPO="${HOMEBREW_TAP_REPO:-tw93/homebrew-tap}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -272,9 +274,10 @@ create_github_release() {
     fi
 
     # Check if release already exists
-    if gh release view "$tag" >/dev/null 2>&1; then
+    if gh release view "$tag" -R "$GITHUB_REPO" >/dev/null 2>&1; then
         log_warn "Release $tag already exists, updating assets..."
         gh release upload "$tag" \
+            -R "$GITHUB_REPO" \
             "$OUT_DIR/Kaku.dmg" \
             "$OUT_DIR/kaku_for_update.zip" \
             "$OUT_DIR/kaku_for_update.zip.sha256" \
@@ -282,6 +285,7 @@ create_github_release() {
     else
         if [[ "$notes_arg" == "--notes-file" ]]; then
             gh release create "$tag" \
+                -R "$GITHUB_REPO" \
                 "$OUT_DIR/Kaku.dmg" \
                 "$OUT_DIR/kaku_for_update.zip" \
                 "$OUT_DIR/kaku_for_update.zip.sha256" \
@@ -289,6 +293,7 @@ create_github_release() {
                 "$notes_arg" "$release_notes_file"
         else
             gh release create "$tag" \
+                -R "$GITHUB_REPO" \
                 "$OUT_DIR/Kaku.dmg" \
                 "$OUT_DIR/kaku_for_update.zip" \
                 "$OUT_DIR/kaku_for_update.zip.sha256" \
@@ -297,13 +302,14 @@ create_github_release() {
         fi
     fi
 
-    log_info "GitHub Release created: https://github.com/tw93/Kaku/releases/tag/$tag"
+    log_info "GitHub Release created: https://github.com/${GITHUB_REPO}/releases/tag/$tag"
 }
 
 # Optional: Update Homebrew tap
 update_homebrew_tap() {
     local version="$1"
     local token=""
+    local dmg_sha256
 
     # Try to get token: env var > gh auth token
     if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
@@ -322,6 +328,8 @@ update_homebrew_tap() {
         return 0
     fi
 
+    dmg_sha256=$(shasum -a 256 "$OUT_DIR/Kaku.dmg" | awk '{print $1}')
+
     log_info "Dispatching Homebrew tap update..."
 
     # Dispatch workflow to update Homebrew tap
@@ -329,12 +337,12 @@ update_homebrew_tap() {
         --method POST \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
-        "/repos/tw93/homebrew-kaku/dispatches" \
-        -f "event_type=release" \
+        "/repos/${HOMEBREW_TAP_REPO}/dispatches" \
+        -f "event_type=kaku_release_published" \
         -f "client_payload[version]=$version" \
-        -f "client_payload[url]=https://github.com/tw93/Kaku/releases/download/V${version}/Kaku.dmg" \
+        -f "client_payload[sha256]=$dmg_sha256" \
         2>/dev/null || {
-        log_warn "Failed to dispatch Homebrew tap update (token may lack permissions for tw93/homebrew-kaku)"
+        log_warn "Failed to dispatch Homebrew tap update for ${HOMEBREW_TAP_REPO}"
         return 0
     }
 
@@ -378,7 +386,7 @@ main() {
     log_info "  - $OUT_DIR/kaku_for_update.zip"
     log_info "  - $OUT_DIR/kaku_for_update.zip.sha256"
     log_info ""
-    log_info "GitHub Release: https://github.com/tw93/Kaku/releases/tag/V${version}"
+    log_info "GitHub Release: https://github.com/${GITHUB_REPO}/releases/tag/V${version}"
 }
 
 main "$@"
