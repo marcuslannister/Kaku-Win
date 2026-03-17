@@ -1,7 +1,7 @@
 #!/bin/bash
 # Kaku Fish Setup Script
-# This script configures a Fish environment using Kaku resources.
-# It is designed to be safe: it backs up existing configurations and can be re-run.
+# Configures a "batteries-included" Fish environment using Kaku's bundled resources.
+# It is designed to be safe: can be re-run at any time.
 
 set -euo pipefail
 
@@ -14,6 +14,7 @@ for arg in "$@"; do
 	esac
 done
 
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -21,8 +22,10 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Thin entrypoint: delegate to `kaku init` whenever possible.
 if [[ "${KAKU_INIT_INTERNAL:-0}" != "1" ]]; then
 	if [[ -n "${KAKU_BIN:-}" && -x "${KAKU_BIN}" ]]; then
 		exec "${KAKU_BIN}" init "$@"
@@ -38,6 +41,7 @@ if [[ "${KAKU_INIT_INTERNAL:-0}" != "1" ]]; then
 	done
 fi
 
+# Resolve resources directory
 if [[ -d "$SCRIPT_DIR/vendor" ]]; then
 	RESOURCES_DIR="$SCRIPT_DIR"
 elif [[ -d "$SCRIPT_DIR/../vendor" ]]; then
@@ -56,12 +60,13 @@ if [[ -n "${KAKU_VENDOR_DIR:-}" && -d "${KAKU_VENDOR_DIR}" ]]; then
 	VENDOR_DIR="${KAKU_VENDOR_DIR}"
 fi
 
-KAKU_TARGET_SHELL="${KAKU_TARGET_SHELL:-fish}"
+TOOL_INSTALL_SCRIPT="$SCRIPT_DIR/install_cli_tools.sh"
+if [[ ! -f "$TOOL_INSTALL_SCRIPT" ]]; then
+	TOOL_INSTALL_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
+fi
 
 USER_CONFIG_DIR="$HOME/.config/kaku/fish"
-KAKU_FISH_FILE="$USER_CONFIG_DIR/kaku.fish"
-FISH_CONF_D_DIR="$HOME/.config/fish/conf.d"
-FISH_CONF_D_FILE="$FISH_CONF_D_DIR/kaku.fish"
+KAKU_INIT_FILE="$USER_CONFIG_DIR/kaku.fish"
 KAKU_TMUX_DIR="$HOME/.config/kaku/tmux"
 KAKU_TMUX_FILE="$KAKU_TMUX_DIR/kaku.tmux.conf"
 STARSHIP_CONFIG="$HOME/.config/starship.toml"
@@ -71,70 +76,25 @@ YAZI_KEYMAP_FILE="$YAZI_CONFIG_DIR/keymap.toml"
 YAZI_THEME_FILE="$YAZI_CONFIG_DIR/theme.toml"
 YAZI_FLAVORS_DIR="$YAZI_CONFIG_DIR/flavors"
 YAZI_WRAPPER_FILE="$USER_CONFIG_DIR/bin/yazi"
-YAZI_YAZI_THEME_MARKER_START="# ===== Kaku Yazi Flavor (managed) ====="
-YAZI_YAZI_THEME_MARKER_END="# ===== End Kaku Yazi Flavor (managed) ====="
-TOOL_INSTALL_SCRIPT="$SCRIPT_DIR/install_cli_tools.sh"
-if [[ ! -f "$TOOL_INSTALL_SCRIPT" ]]; then
-	TOOL_INSTALL_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
-fi
+KAKU_YAZI_THEME_MARKER_START="# ===== Kaku Yazi Flavor (managed) ====="
+KAKU_YAZI_THEME_MARKER_END="# ===== End Kaku Yazi Flavor (managed) ====="
+FISH_CONF_D_DIR="$HOME/.config/fish/conf.d"
+FISH_CONF_D_FILE="$FISH_CONF_D_DIR/kaku.fish"
+TMUXRC="$HOME/.tmux.conf"
+BACKUP_SUFFIX=".kaku-backup-$(date +%s)"
+TMUXRC_BACKED_UP=0
+
 if [[ -d "$SCRIPT_DIR/yazi-flavors" ]]; then
 	KAKU_YAZI_FLAVOR_SOURCE_DIR="$SCRIPT_DIR/yazi-flavors"
 else
 	KAKU_YAZI_FLAVOR_SOURCE_DIR="$RESOURCES_DIR/yazi-flavors"
 fi
-YAZI_KEYMAP_DEFAULTS=(
-	'  { on = "e", run = "open", desc = "Edit or open selected files" },'
-	'  { on = "o", run = "open", desc = "Edit or open selected files" },'
-	'  { on = "<Enter>", run = "enter", desc = "Enter the child directory" },'
-)
 
-ensure_dirs() {
-	mkdir -p "$USER_CONFIG_DIR"
-	mkdir -p "$USER_CONFIG_DIR/bin"
-	mkdir -p "$KAKU_TMUX_DIR"
-	mkdir -p "$FISH_CONF_D_DIR"
-	mkdir -p "$YAZI_CONFIG_DIR"
-}
-
-write_fish_integration_file() {
-	cat <<'EOF' >"$KAKU_FISH_FILE"
-# Kaku Fish Integration
-set -gx KAKU_FISH_DIR "$HOME/.config/kaku/fish"
-set -gx KAKU_SHELL fish
-set -gx KAKU_SHELL_INTEGRATION_ACTIVE 1
-set -gx KAKU_TERM "kaku"
-set -gx CLICOLOR 1
-set -gx LSCOLORS "gxfxcxdxbxegedabagacad"
-
-set -l _kaku_bin_dir "$KAKU_FISH_DIR/bin"
-if not contains -- "$_kaku_bin_dir" $PATH
-	set -gx PATH "$_kaku_bin_dir" $PATH
-end
-
-if command -q starship; and status --is-interactive
-	starship init fish | source
-end
-
-bind ctrl-r history-search-backward
-bind ctrl-s history-search-forward
-
-bind -M insert ctrl-r history-search-backward
-bind -M insert ctrl-s history-search-forward
-bind -M default up history-search-backward
-bind -M default down history-search-forward
-EOF
-}
-
-ensure_tmux_integration() {
-	mkdir -p "$KAKU_TMUX_DIR"
-	cat <<'EOF' >"$KAKU_TMUX_FILE"
-# Kaku tmux Integration - DO NOT EDIT MANUALLY
-# This file is managed by Kaku.app. Any changes may be overwritten.
-
-set -g mouse on
-bind-key -n S-WheelUpPane if-shell -F '#{pane_in_mode}' 'send-keys -X -N 5 scroll-up' 'copy-mode -e -u'
-bind-key -n S-WheelDownPane if-shell -F '#{pane_in_mode}' 'send-keys -X -N 5 scroll-down' ''
-EOF
+backup_tmuxrc_once() {
+	if [[ -f "$TMUXRC" ]] && [[ "$TMUXRC_BACKED_UP" -eq 0 ]]; then
+		cp "$TMUXRC" "$TMUXRC$BACKUP_SUFFIX"
+		TMUXRC_BACKED_UP=1
+	fi
 }
 
 default_kaku_config_path() {
@@ -207,6 +167,17 @@ current_kaku_yazi_flavor() {
 	resolve_kaku_flavor_from_config "$(active_kaku_config_path)"
 }
 
+kaku_yazi_theme_block() {
+	local flavor="${1:-$(current_kaku_yazi_flavor)}"
+	cat <<EOF
+$KAKU_YAZI_THEME_MARKER_START
+[flavor]
+dark = "$flavor"
+light = "$flavor"
+$KAKU_YAZI_THEME_MARKER_END
+EOF
+}
+
 is_legacy_kaku_yazi_theme_file() {
 	if [[ ! -f "$YAZI_THEME_FILE" ]]; then
 		return 1
@@ -217,60 +188,8 @@ is_legacy_kaku_yazi_theme_file() {
 	fi
 	local normalized expected
 	normalized="$(sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$YAZI_THEME_FILE")"
-	expected=$'[mgr]\nborder_symbol = "│"\nborder_style = { fg = "#555555" }\n[indicator]\npadding = { open = "", close = "" }'
+	expected=$'[mgr]\nborder_symbol = "│"\nborder_style = { fg = "#555555" }\n[indicator]\npadding = { open = "", close = "" }'
 	[[ "$normalized" == "$expected" ]]
-}
-
-kaku_yazi_theme_block() {
-	local flavor="${1:-$(current_kaku_yazi_flavor)}"
-	cat <<EOF
-$YAZI_YAZI_THEME_MARKER_START
-[flavor]
-dark = "$flavor"
-light = "$flavor"
-$YAZI_YAZI_THEME_MARKER_END
-EOF
-}
-
-ensure_kaku_yazi_theme() {
-	local managed_flavor
-	managed_flavor="$(current_kaku_yazi_flavor)"
-	if [[ ! -f "$YAZI_THEME_FILE" ]] || is_legacy_kaku_yazi_theme_file; then
-		cat <<EOF >"$YAZI_THEME_FILE"
-"\$schema" = "https://yazi-rs.github.io/schemas/theme.json"
-
-# Kaku manages the [flavor] section below so Yazi matches the current Kaku theme.
-# Add your own theme overrides in other sections if needed.
-$(kaku_yazi_theme_block "$managed_flavor")
-EOF
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi theme ${NC}(managed Kaku flavor: $managed_flavor)${NC}"
-		return
-	fi
-
-	if grep -Eq '^[[:space:]]*\[flavor\][[:space:]]*$' "$YAZI_THEME_FILE" && ! grep -Fq "$YAZI_YAZI_THEME_MARKER_START" "$YAZI_THEME_FILE"; then
-		echo -e "  ${BLUE}•${NC} ${BOLD}Config${NC}      Preserved existing yazi [flavor] section${NC}"
-		return
-	fi
-
-	local tmp_theme
-	tmp_theme="$(mktemp "${TMPDIR:-/tmp}/kaku-yazi-theme.XXXXXX")"
-
-	awk -v start="$YAZI_YAZI_THEME_MARKER_START" -v end="$YAZI_YAZI_THEME_MARKER_END" '
-		index($0, start) { skip = 1; next }
-		index($0, end) { skip = 0; next }
-		!skip { print }
-	' "$YAZI_THEME_FILE" >"$tmp_theme"
-
-	{
-		cat "$tmp_theme"
-		printf '\n'
-		kaku_yazi_theme_block "$managed_flavor"
-		printf '\n'
-	} >"${tmp_theme}.next"
-
-	mv "${tmp_theme}.next" "$YAZI_THEME_FILE"
-	rm -f "$tmp_theme"
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Updated yazi theme ${NC}(managed Kaku flavor: $managed_flavor)${NC}"
 }
 
 sync_kaku_yazi_flavors() {
@@ -280,10 +199,12 @@ sync_kaku_yazi_flavors() {
 	fi
 
 	mkdir -p "$YAZI_FLAVORS_DIR"
+
 	local flavor source_dir target_dir
 	for flavor in kaku-dark.yazi kaku-light.yazi; do
 		source_dir="$KAKU_YAZI_FLAVOR_SOURCE_DIR/$flavor"
 		target_dir="$YAZI_FLAVORS_DIR/$flavor"
+
 		if [[ ! -d "$source_dir" ]]; then
 			echo -e "${YELLOW}Warning: missing bundled Yazi flavor $source_dir.${NC}"
 			continue
@@ -301,7 +222,51 @@ sync_kaku_yazi_flavors() {
 	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Refreshed Kaku yazi flavors ${NC}(dark + light)${NC}"
 }
 
+ensure_kaku_yazi_theme() {
+	mkdir -p "$YAZI_CONFIG_DIR"
+	local managed_flavor
+	managed_flavor="$(current_kaku_yazi_flavor)"
+
+	if [[ ! -f "$YAZI_THEME_FILE" ]] || is_legacy_kaku_yazi_theme_file; then
+		cat <<EOF >"$YAZI_THEME_FILE"
+"\$schema" = "https://yazi-rs.github.io/schemas/theme.json"
+
+# Kaku manages the [flavor] section below so Yazi matches the current Kaku theme.
+# Add your own theme overrides in other sections if needed.
+$(kaku_yazi_theme_block "$managed_flavor")
+EOF
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi theme ${NC}(managed Kaku flavor: $managed_flavor)${NC}"
+		return
+	fi
+
+	if grep -Eq '^[[:space:]]*\[flavor\][[:space:]]*$' "$YAZI_THEME_FILE" && ! grep -Fq "$KAKU_YAZI_THEME_MARKER_START" "$YAZI_THEME_FILE"; then
+		echo -e "  ${BLUE}•${NC} ${BOLD}Config${NC}      Preserved existing yazi [flavor] section ${NC}(user-managed)${NC}"
+		return
+	fi
+
+	local tmp_theme
+	tmp_theme="$(mktemp "${TMPDIR:-/tmp}/kaku-yazi-theme.XXXXXX")"
+
+	awk -v start="$KAKU_YAZI_THEME_MARKER_START" -v end="$KAKU_YAZI_THEME_MARKER_END" '
+		index($0, start) { skip = 1; next }
+		index($0, end)   { skip = 0; next }
+		!skip { print }
+	' "$YAZI_THEME_FILE" >"$tmp_theme"
+
+	{
+		cat "$tmp_theme"
+		printf '\n'
+		kaku_yazi_theme_block "$managed_flavor"
+		printf '\n'
+	} >"${tmp_theme}.next"
+
+	mv "${tmp_theme}.next" "$YAZI_THEME_FILE"
+	rm -f "$tmp_theme"
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Updated yazi theme ${NC}(managed Kaku flavor: $managed_flavor)${NC}"
+}
+
 install_yazi_wrapper() {
+	# The yazi wrapper for fish lives in fish/bin/ but its content is shell-agnostic bash.
 	cat <<'EOF' >"$YAZI_WRAPPER_FILE"
 #!/bin/bash
 set -euo pipefail
@@ -472,138 +437,11 @@ EOF
 	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Installed yazi wrapper ${NC}(theme sync before launch)${NC}"
 }
 
-ensure_yazi_base_config() {
-	if [[ -f "$YAZI_CONFIG_FILE" ]]; then
-		return
-	fi
-
-	cat <<EOF >"$YAZI_CONFIG_FILE"
-[mgr]
-ratio = [3, 3, 10]
-
-[preview]
-max_width = 2000
-max_height = 2400
-
-[opener]
-edit = [
-  { run = "\${EDITOR:-vim} %s", desc = "edit", for = "unix", block = true },
-]
-EOF
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi.toml ${NC}(~/.config/yazi/yazi.toml)${NC}"
-}
-
-ensure_yazi_preview_size_defaults() {
-	if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
-		return
-	fi
-
-	local preview_block
-	preview_block="$(awk '
-		BEGIN { in_preview = 0 }
-		/^[[:space:]]*\[preview\][[:space:]]*$/ { in_preview = 1; next }
-		/^[[:space:]]*\[[^]]+\][[:space:]]*$/ { in_preview = 0 }
-		in_preview { print }
-	' "$YAZI_CONFIG_FILE")"
-
-	local has_preview_section=false
-	local has_max_width=false
-	local has_max_height=false
-
-	if grep -Eq '^[[:space:]]*\[preview\][[:space:]]*$' "$YAZI_CONFIG_FILE"; then
-		has_preview_section=true
-	fi
-	if grep -Eq '^[[:space:]]*max_width[[:space:]]*=' <<<"$preview_block"; then
-		has_max_width=true
-	fi
-	if grep -Eq '^[[:space:]]*max_height[[:space:]]*=' <<<"$preview_block"; then
-		has_max_height=true
-	fi
-
-	if [[ "$has_preview_section" == "false" ]]; then
-		cat <<EOF >>"$YAZI_CONFIG_FILE"
-
-[preview]
-max_width = 2000
-max_height = 2400
-EOF
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Added default Yazi preview size ${NC}(2000x2400)${NC}"
-		return
-	fi
-
-	if [[ "$has_max_width" == "true" ]] && [[ "$has_max_height" == "true" ]]; then
-		return
-	fi
-
-	local tmp_yazi
-	tmp_yazi="$(mktemp "${TMPDIR:-/tmp}/kaku-yazi-preview.XXXXXX")"
-	awk -v need_width="$has_max_width" -v need_height="$has_max_height" '
-		/^[[:space:]]*\[preview\][[:space:]]*$/ {
-			print
-			if (need_width != "true") {
-				print "max_width = 2000"
-			}
-			if (need_height != "true") {
-				print "max_height = 2400"
-			}
-			next
-		}
-		{ print }
-	' "$YAZI_CONFIG_FILE" >"$tmp_yazi"
-	mv "$tmp_yazi" "$YAZI_CONFIG_FILE"
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Completed Yazi preview size defaults ${NC}(2000x2400)${NC}"
-}
-
-ensure_yazi_edit_opener() {
-	if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
-		return
-	fi
-
-	if grep -Eq '^[[:space:]]*edit[[:space:]]*=' "$YAZI_CONFIG_FILE"; then
-		return
-	fi
-
-	if grep -Eq '^[[:space:]]*\[opener\][[:space:]]*$' "$YAZI_CONFIG_FILE"; then
-		local tmp_yazi
-		tmp_yazi="$(mktemp "${TMPDIR:-/tmp}/kaku-yazi-edit.XXXXXX")"
-		awk '/^[[:space:]]*\[opener\][[:space:]]*$/ {
-			print
-			print "edit = ["
-			print "  { run = \"${EDITOR:-vim} %s\", desc = \"edit\", for = \"unix\", block = true },"
-			print "]"
-			next
-		}
-		{ print }' "$YAZI_CONFIG_FILE" >"$tmp_yazi"
-		mv "$tmp_yazi" "$YAZI_CONFIG_FILE"
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Added default Yazi edit opener under existing [opener] section"
-		return
-	fi
-
-	cat <<EOF >>"$YAZI_CONFIG_FILE"
-
-[opener]
-edit = [
-  { run = "\${EDITOR:-vim} %s", desc = "edit", for = "unix", block = true },
-]
-EOF
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Added default Yazi edit opener ${NC}(vim)${NC}"
-}
-
-ensure_yazi_keymap() {
-	if [[ -f "$YAZI_KEYMAP_FILE" ]]; then
-		return
-	fi
-
-	cat <<EOF >"$YAZI_KEYMAP_FILE"
-"\$schema" = "https://yazi-rs.github.io/schemas/keymap.json"
-
-[mgr]
-prepend_keymap = [
-$(printf '%s\n' "${YAZI_KEYMAP_DEFAULTS[@]}")
-]
-EOF
-	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi keymap ${NC}(~/.config/yazi/keymap.toml)${NC}"
-}
+# Ensure vendor resources exist
+if [[ ! -d "$VENDOR_DIR" ]]; then
+	echo -e "${YELLOW}Error: Vendor resources not found in $VENDOR_DIR${NC}"
+	exit 1
+fi
 
 install_kaku_terminfo() {
 	if [[ "${KAKU_SKIP_TERMINFO_BOOTSTRAP:-0}" == "1" ]]; then
@@ -640,7 +478,7 @@ install_kaku_terminfo() {
 
 	if [[ -n "$source_entry" ]]; then
 		if ! command -v tic >/dev/null 2>&1; then
-			echo -e "${YELLOW}Warning: tic not found, skipping kaku terminfo installation.${NC}"
+			echo -e "${YELLOW}Warning: tic not found, skipping kaku terminfo install.${NC}"
 			return
 		fi
 
@@ -654,69 +492,356 @@ install_kaku_terminfo() {
 	echo -e "${YELLOW}Warning: failed to install kaku terminfo automatically.${NC}"
 }
 
-ensure_starship_config() {
-	if [[ -f "$STARSHIP_CONFIG" ]]; then
-		return
-	fi
+install_kaku_terminfo
 
+echo -e "${BOLD}Setting up Kaku Fish Shell Environment${NC}"
+
+# 1. Prepare User Config Directory
+mkdir -p "$USER_CONFIG_DIR"
+mkdir -p "$USER_CONFIG_DIR/bin"
+
+# 2. Optional external tools bootstrap (Homebrew-managed)
+if [[ "${KAKU_SKIP_TOOL_BOOTSTRAP:-0}" != "1" ]]; then
+	if [[ -f "$TOOL_INSTALL_SCRIPT" ]]; then
+		if ! bash "$TOOL_INSTALL_SCRIPT"; then
+			echo -e "${YELLOW}Warning: optional CLI tool bootstrap failed.${NC}"
+		fi
+	else
+		echo -e "${YELLOW}Warning: missing tool bootstrap script at $TOOL_INSTALL_SCRIPT${NC}"
+	fi
+fi
+
+# Copy Starship Config (if not exists)
+if [[ ! -f "$STARSHIP_CONFIG" ]]; then
 	if [[ -f "$VENDOR_DIR/starship.toml" ]]; then
 		mkdir -p "$(dirname "$STARSHIP_CONFIG")"
 		cp "$VENDOR_DIR/starship.toml" "$STARSHIP_CONFIG"
 		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized starship.toml ${NC}(~/.config/starship.toml)${NC}"
-		return
-	fi
-
-	if [[ -n "${KAKU_VENDOR_DIR:-}" && -f "$KAKU_VENDOR_DIR/starship.toml" ]]; then
-		mkdir -p "$(dirname "$STARSHIP_CONFIG")"
-		cp "$KAKU_VENDOR_DIR/starship.toml" "$STARSHIP_CONFIG"
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized starship.toml ${NC}(~/.config/starship.toml)${NC}"
-	fi
-}
-
-ensure_dirs
-
-if [[ ! -f "$KAKU_FISH_FILE" || "$UPDATE_ONLY" == "true" ]]; then
-	write_fish_integration_file
-	if grep -qF "# Kaku Fish Integration" "$KAKU_FISH_FILE"; then
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Refreshed Kaku fish integration file"
-	else
-		echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Wrote Kaku fish integration file"
 	fi
 fi
 
-cat <<'EOF' >"$FISH_CONF_D_FILE"
-# Kaku shell integration -- managed. Remove with: kaku reset
-set -l _kaku_fish_init "$HOME/.config/kaku/fish/kaku.fish"
-if test -f $_kaku_fish_init
-    source $_kaku_fish_init
-end
-EOF
-echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Installed ${NC}~/.config/fish/conf.d/kaku.fish${NC}"
+# Initialize Yazi configs if not yet created
+if [[ ! -f "$YAZI_CONFIG_FILE" ]]; then
+	mkdir -p "$YAZI_CONFIG_DIR"
+	cat <<EOF >"$YAZI_CONFIG_FILE"
+[mgr]
+ratio = [3, 3, 10]
 
-ensure_tmux_integration
-install_kaku_terminfo
-ensure_starship_config
-ensure_yazi_base_config
-ensure_yazi_preview_size_defaults
-ensure_yazi_edit_opener
-ensure_yazi_keymap
+[preview]
+max_width = 2000
+max_height = 2400
+
+[opener]
+edit = [
+  { run = "\${EDITOR:-vim} %s", desc = "edit", for = "unix", block = true },
+]
+EOF
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi.toml ${NC}(~/.config/yazi/yazi.toml)${NC}"
+fi
+
+if [[ ! -f "$YAZI_KEYMAP_FILE" ]]; then
+	mkdir -p "$YAZI_CONFIG_DIR"
+	cat <<EOF >"$YAZI_KEYMAP_FILE"
+"\$schema" = "https://yazi-rs.github.io/schemas/keymap.json"
+
+[mgr]
+prepend_keymap = [
+  { on = "e", run = "open", desc = "Edit or open selected files" },
+  { on = "o", run = "open", desc = "Edit or open selected files" },
+  { on = "<Enter>", run = "enter", desc = "Enter the child directory" },
+]
+EOF
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Config${NC}      Initialized yazi keymap ${NC}(~/.config/yazi/keymap.toml)${NC}"
+fi
+
 sync_kaku_yazi_flavors
 ensure_kaku_yazi_theme
 install_yazi_wrapper
 
-if [[ -n "${KAKU_SKIP_TOOL_BOOTSTRAP:-}" ]]; then
-	echo -e "${BLUE}Info:${NC} Tool bootstrap skipped by KAKU_SKIP_TOOL_BOOTSTRAP"
-	exit 0
-fi
+# 3. Configure tmux (Optional)
+TMUX_SOURCE_LINE='source-file "$HOME/.config/kaku/tmux/kaku.tmux.conf" # Kaku tmux Integration'
 
-if [[ -f "$TOOL_INSTALL_SCRIPT" ]]; then
-	export KAKU_TARGET_SHELL="fish"
-	if ! bash "$TOOL_INSTALL_SCRIPT"; then
-		echo -e "${YELLOW}Warning: optional tool installation failed.${NC}"
+write_kaku_tmux_file() {
+	mkdir -p "$KAKU_TMUX_DIR"
+	cat <<'EOF' >"$KAKU_TMUX_FILE"
+# Kaku tmux Integration - DO NOT EDIT MANUALLY
+# This file is managed by Kaku.app. Any changes may be overwritten.
+
+set -g mouse on
+bind-key -n S-WheelUpPane if-shell -F '#{pane_in_mode}' 'send-keys -X -N 5 scroll-up' 'copy-mode -e -u'
+bind-key -n S-WheelDownPane if-shell -F '#{pane_in_mode}' 'send-keys -X -N 5 scroll-down' ''
+EOF
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Script${NC}      Generated managed tmux integration"
+}
+
+normalize_kaku_tmux_source_line() {
+	if [[ ! -f "$TMUXRC" ]]; then
+		return
 	fi
-else
-	echo -e "${YELLOW}Info: install_cli_tools.sh not found, skipped.${NC}"
-fi
+
+	local tmp_file
+	tmp_file="$(mktemp "${TMPDIR:-/tmp}/kaku-tmuxrc.XXXXXX")"
+
+	if awk -v source_line="$TMUX_SOURCE_LINE" '
+BEGIN { replaced = 0; extra = 0 }
+{
+	if ($0 ~ /^[[:space:]]*#/ ) {
+		print
+		next
+	}
+
+	if ($0 ~ /^[[:space:]]*source-file[[:space:]]+/ &&
+	    $0 ~ /kaku\/tmux\/kaku\.tmux\.conf/) {
+		if (!replaced) {
+			print source_line
+			replaced = 1
+		} else {
+			extra++
+		}
+		next
+	}
+
+	print
+}
+END {
+	if (replaced && extra > 0) {
+		exit 2
+	} else if (replaced) {
+		exit 0
+	}
+	exit 3
+}
+' "$TMUXRC" >"$tmp_file"; then
+		if ! cmp -s "$TMUXRC" "$tmp_file"; then
+			backup_tmuxrc_once
+			mv "$tmp_file" "$TMUXRC"
+			echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Updated Kaku source line in .tmux.conf"
+		else
+			rm -f "$tmp_file"
+		fi
+	else
+		local awk_status="$?"
+		if [[ "$awk_status" == "2" ]]; then
+			if ! cmp -s "$TMUXRC" "$tmp_file"; then
+				backup_tmuxrc_once
+				mv "$tmp_file" "$TMUXRC"
+				echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Removed duplicate Kaku source line(s) from .tmux.conf"
+			else
+				rm -f "$tmp_file"
+			fi
+		else
+			rm -f "$tmp_file"
+			if [[ "$awk_status" != "3" ]]; then
+				echo -e "${YELLOW}Warning: failed to normalize Kaku source line in .tmux.conf; leaving it unchanged.${NC}"
+			fi
+		fi
+	fi
+}
+
+has_kaku_tmux_source_line() {
+	if [[ ! -f "$TMUXRC" ]]; then
+		return 1
+	fi
+
+	if grep -Fqx "$TMUX_SOURCE_LINE" "$TMUXRC"; then
+		return 0
+	fi
+
+	grep -Eq '^[[:space:]]*source-file[[:space:]].*kaku/tmux/kaku\.tmux\.conf([[:space:]]|$)' "$TMUXRC"
+}
+
+ensure_kaku_tmux_integration() {
+	local tmux_cmd=""
+	if command -v tmux >/dev/null 2>&1; then
+		tmux_cmd="tmux"
+	elif [[ -x /opt/homebrew/bin/tmux ]]; then
+		tmux_cmd=/opt/homebrew/bin/tmux
+	elif [[ -x /usr/local/bin/tmux ]]; then
+		tmux_cmd=/usr/local/bin/tmux
+	fi
+
+	if [[ -z "$tmux_cmd" ]]; then
+		echo -e "  ${BLUE}•${NC} ${BOLD}Integrate${NC}   Skipped tmux integration ${NC}(tmux not found)${NC}"
+		return
+	fi
+
+	write_kaku_tmux_file
+	normalize_kaku_tmux_source_line
+
+	if has_kaku_tmux_source_line; then
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Already linked in .tmux.conf"
+	else
+		backup_tmuxrc_once
+		if [[ -f "$TMUXRC" && -s "$TMUXRC" ]]; then
+			echo "" >>"$TMUXRC"
+		fi
+		echo "$TMUX_SOURCE_LINE" >>"$TMUXRC"
+		echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Successfully patched .tmux.conf"
+	fi
+}
+
+ensure_kaku_tmux_integration
+
+# 4. Generate Kaku Fish Init File
+cat <<'EOF' >"$KAKU_INIT_FILE"
+# Kaku Fish Integration - DO NOT EDIT MANUALLY
+# This file is managed by Kaku.app. Any changes may be overwritten.
+
+# === PATH ===
+fish_add_path "$HOME/.config/kaku/fish/bin"
+
+# === Starship prompt ===
+if command -q starship
+    starship init fish | source
+end
+
+# === Zoxide ===
+if command -q zoxide
+    zoxide init fish | source
+end
+
+# === SSH TERM fix ===
+# Auto-set TERM to xterm-256color for SSH connections since remote hosts
+# typically lack the kaku terminfo entry.
+function ssh
+    if test "$TERM" = kaku; and not set -q KAKU_SSH_SKIP_TERM_FIX
+        TERM=xterm-256color command ssh $argv
+    else
+        command ssh $argv
+    end
+end
+
+# === sudo TERM fix ===
+# sudo resets TERMINFO_DIRS, so root processes may fail with "unknown terminal kaku".
+function sudo
+    if test "$TERM" = kaku; and not set -q KAKU_SUDO_SKIP_TERM_FIX
+        TERM=xterm-256color command sudo $argv
+    else
+        command sudo $argv
+    end
+end
+
+# === OSC 7: Working directory reporting ===
+function __kaku_osc7 --on-event fish_prompt
+    printf '\033]7;file://%s%s\033\\' (hostname) $PWD
+end
+
+# === OSC 133: Semantic prompt zones ===
+function __kaku_semantic_preexec --on-event fish_preexec
+    printf '\033]133;C;\007'
+end
+function __kaku_semantic_precmd --on-event fish_prompt
+    printf '\033]133;A\007'
+end
+
+# === OSC 1337: User variables (AI fix hooks) ===
+function __kaku_set_user_var
+    # Only emit when inside a Kaku/WezTerm pane
+    if test "$TERM" != kaku; and not set -q WEZTERM_PANE
+        return
+    end
+    if set -q WEZTERM_SHELL_SKIP_USER_VARS; and test "$WEZTERM_SHELL_SKIP_USER_VARS" = 1
+        return
+    end
+    if not command -q base64
+        return
+    end
+    set -l encoded (printf '%s' $argv[2] | base64 | tr -d '\r\n')
+    if set -q TMUX
+        printf '\033Ptmux;\033\033]1337;SetUserVar=%s=%s\007\033\\' $argv[1] $encoded
+    else
+        printf '\033]1337;SetUserVar=%s=%s\007' $argv[1] $encoded
+    end
+end
+
+# Capture last command for AI suggestion (preexec fires before command runs)
+function __kaku_ai_preexec --on-event fish_preexec
+    if set -q KAKU_AUTO_DISABLE
+        return
+    end
+    __kaku_set_user_var kaku_last_cmd $argv[1]
+    set -g _kaku_ai_cmd_pending 1
+end
+
+# Capture exit code for AI suggestion (fish_prompt fires after command finishes)
+function __kaku_ai_precmd --on-event fish_prompt
+    set -l last_exit $status
+    if set -q KAKU_AUTO_DISABLE
+        set -g _kaku_ai_cmd_pending 0
+        return
+    end
+    if not set -q _kaku_ai_cmd_pending; or test "$_kaku_ai_cmd_pending" != 1
+        return
+    end
+    __kaku_set_user_var kaku_last_exit_code $last_exit
+    set -g _kaku_ai_cmd_pending 0
+end
+
+# === Common aliases ===
+alias ll='ls -lhF'
+alias la='ls -lAhF'
+alias l='ls -CF'
+alias grep='grep --color=auto'
+alias egrep='grep -E --color=auto'
+alias fgrep='grep -F --color=auto'
+
+# Git aliases
+alias g='git'
+alias ga='git add'
+alias gaa='git add --all'
+alias gb='git branch'
+alias gbd='git branch -d'
+alias gc='git commit -v'
+alias gcmsg='git commit -m'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gf='git fetch'
+alias gl='git pull'
+alias gp='git push'
+alias gst='git status'
+alias gss='git status -s'
+alias glo='git log --oneline --decorate'
+alias glg='git log --stat'
+
+# Directory navigation
+alias md='mkdir -p'
+alias ...='../..'
+alias ....='../../..'
+
+# yazi launcher — cd into the directory yazi is in when you exit.
+function y
+    set -l yazi_cmd "$HOME/.config/kaku/fish/bin/yazi"
+    if not test -x "$yazi_cmd"
+        set yazi_cmd (command -v yazi 2>/dev/null; or true)
+    end
+    if test -z "$yazi_cmd"
+        echo "yazi not found. Install it with: brew install yazi"
+        return 127
+    end
+    set -l tmp (mktemp -t 'yazi-cwd.XXXXXX')
+    $yazi_cmd $argv --cwd-file=$tmp
+    if set -l cwd (command cat -- $tmp); and test -n "$cwd"; and test "$cwd" != "$PWD"
+        builtin cd -- $cwd
+    end
+    rm -f -- $tmp
+end
+EOF
+
+echo -e "  ${GREEN}✓${NC} ${BOLD}Script${NC}      Generated kaku.fish init script"
+
+# 5. Install fish conf.d entry point
+mkdir -p "$FISH_CONF_D_DIR"
+cat <<EOF >"$FISH_CONF_D_FILE"
+# Kaku shell integration -- managed. Remove with: kaku reset
+set -l _kaku_fish_init "\$HOME/.config/kaku/fish/kaku.fish"
+if test -f \$_kaku_fish_init
+    source \$_kaku_fish_init
+end
+EOF
+
+echo -e "  ${GREEN}✓${NC} ${BOLD}Integrate${NC}   Installed ${NC}~/.config/fish/conf.d/kaku.fish${NC}"
 
 echo ""
 echo -e "${GREEN}${BOLD}Kaku Fish setup complete!${NC}"

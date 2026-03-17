@@ -999,7 +999,7 @@ alias glo='git log --oneline --decorate'
 alias glg='git log --stat'
 alias glgp='git log --stat -p'
 
-# yazi launcher — stays in the original directory after exit.
+# yazi launcher — cd into the directory yazi is in when you exit.
 'y'() {
     emulate -L zsh
     setopt local_options no_sh_word_split
@@ -1014,7 +1014,13 @@ alias glgp='git log --stat -p'
         return 127
     fi
 
-    "\$yazi_cmd" "\$@"
+    local tmp cwd
+    tmp="\$(mktemp -t 'yazi-cwd.XXXXXX')"
+    "\$yazi_cmd" "\$@" --cwd-file="\$tmp"
+    if cwd="\$(command cat -- "\$tmp")" && [[ -n "\$cwd" && "\$cwd" != "\$PWD" ]]; then
+        builtin cd -- "\$cwd"
+    fi
+    rm -f -- "\$tmp"
 }
 
 # Load Plugins (Performance Optimized)
