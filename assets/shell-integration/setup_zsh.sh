@@ -1293,7 +1293,11 @@ if (( \$+aliases[ssh] )); then
         fi
 
         _kaku_alias_words=(\${(z)_kaku_existing_ssh_alias})
-        if [[ "\$TERM" == "kaku" ]]; then
+        if [[ "\${_kaku_alias_words[1]-}" == "ssh" ]]; then
+            _kaku_wrapped_ssh "\${(@)_kaku_alias_words[2,-1]}" "\$@"
+        elif [[ "\${_kaku_alias_words[1]-}" == "command" && "\${_kaku_alias_words[2]-}" == "ssh" ]]; then
+            _kaku_wrapped_ssh "\${(@)_kaku_alias_words[3,-1]}" "\$@"
+        elif [[ "\$TERM" == "kaku" ]]; then
             TERM=xterm-256color "\${_kaku_alias_words[@]}" "\${extra_opts[@]}" "\$@"
         else
             "\${_kaku_alias_words[@]}" "\${extra_opts[@]}" "\$@"

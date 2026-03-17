@@ -56,7 +56,11 @@ if [ -n "${ZSH_NAME-}" ] && alias ssh >/dev/null 2>&1; then
   function ssh {
     local -a _kaku_alias_words
     _kaku_alias_words=(${(z)_kaku_existing_ssh_alias})
-    if [[ -z "${KAKU_SSH_SKIP_TERM_FIX-}" && "${TERM:-}" == "kaku" ]]; then
+    if [[ "${_kaku_alias_words[1]-}" == "ssh" ]]; then
+      _kaku_wrapped_ssh "${(@)_kaku_alias_words[2,-1]}" "$@"
+    elif [[ "${_kaku_alias_words[1]-}" == "command" && "${_kaku_alias_words[2]-}" == "ssh" ]]; then
+      _kaku_wrapped_ssh "${(@)_kaku_alias_words[3,-1]}" "$@"
+    elif [[ -z "${KAKU_SSH_SKIP_TERM_FIX-}" && "${TERM:-}" == "kaku" ]]; then
       TERM=xterm-256color "${_kaku_alias_words[@]}" "$@"
     else
       "${_kaku_alias_words[@]}" "$@"
