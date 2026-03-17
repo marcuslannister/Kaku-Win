@@ -44,6 +44,13 @@ fn should_rebalance_top_tab_visible_bottom_gap(
     !user_has_custom_padding && show_tab_bar && !tab_bar_at_bottom
 }
 
+fn should_rebalance_bottom_tab_quantization_slack(
+    user_has_custom_padding: bool,
+    tab_bar_at_bottom: bool,
+) -> bool {
+    !user_has_custom_padding && tab_bar_at_bottom
+}
+
 fn rebalance_top_padding_for_bottom_gap(
     padding_top: usize,
     padding_bottom: usize,
@@ -451,6 +458,18 @@ impl super::TermWindow {
                     padding_bottom,
                     row_quantization_slack,
                     TOP_TAB_VISIBLE_BOTTOM_GAP,
+                );
+                padding_top = rebalanced_top;
+            } else if should_rebalance_bottom_tab_quantization_slack(
+                user_has_custom_padding,
+                self.config.tab_bar_at_bottom,
+            ) {
+                let row_quantization_slack = avail_height.saturating_sub(rows * cell_height);
+                let (rebalanced_top, _) = rebalance_top_padding_for_bottom_gap(
+                    padding_top,
+                    padding_bottom,
+                    row_quantization_slack,
+                    BOTTOM_TAB_VISIBLE_MIN_GAP,
                 );
                 padding_top = rebalanced_top;
             }
@@ -1441,5 +1460,46 @@ mod tests {
         assert!(!should_defer_screen_change_scale_update(
             true, true, false, 96, 96
         ));
+    }
+
+    #[test]
+    fn bottom_tab_rebalance_applies_only_for_managed_bottom_tab() {
+        use super::should_rebalance_bottom_tab_quantization_slack;
+        assert!(should_rebalance_bottom_tab_quantization_slack(
+            false, // managed padding
+            true,  // bottom-tab
+        ));
+        assert!(!should_rebalance_bottom_tab_quantization_slack(
+            true, // user custom padding
+            true,
+        ));
+        assert!(!should_rebalance_bottom_tab_quantization_slack(
+            false, // managed padding
+            false, // top-tab — handled by top-tab rebalance
+        ));
+    }
+
+    #[test]
+    fn bottom_tab_rebalance_absorbs_quantization_slack_into_top_padding() {
+        // Simulate: cell_height=23, avail_height=1372, rows=59, slack=15
+        // padding_bottom=2 (BOTTOM_TAB_VISIBLE_MIN_GAP), padding_top=36
+        // bottom_gap = 2 + 15 = 17 > BOTTOM_TAB_VISIBLE_MIN_GAP(2)
+        // shift = 17 - 2 = 15 → padding_top increases by 15, bottom strip eliminated
+        let (top, shifted) = rebalance_top_padding_for_bottom_gap(
+            36,
+            2,
+            15,
+            super::BOTTOM_TAB_VISIBLE_MIN_GAP,
+        );
+        assert_eq!(shifted, 15);
+        assert_eq!(top, 51);
+    }
+
+    #[test]
+    fn bottom_tab_rebalance_noop_when_no_slack() {
+        let (top, shifted) =
+            rebalance_top_padding_for_bottom_gap(36, 2, 0, super::BOTTOM_TAB_VISIBLE_MIN_GAP);
+        assert_eq!(shifted, 0);
+        assert_eq!(top, 36);
     }
 }
