@@ -8,9 +8,9 @@ use crate::inputmap::InputMap;
 use crate::overlay::confirm_close_window;
 use crate::overlay::launcher::LauncherTabEntry;
 use crate::overlay::{
-    CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags, QuickSelectOverlay,
     confirm_close_pane, confirm_close_tab, confirm_quit_program, launcher, start_overlay,
-    start_overlay_pane,
+    start_overlay_pane, CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags,
+    QuickSelectOverlay,
 };
 use crate::resize_increment_calculator::ResizeIncrementCalculator;
 use crate::scripting::guiwin::GuiWin;
@@ -19,7 +19,7 @@ use crate::selection::Selection;
 use crate::shapecache::*;
 use crate::tabbar::{TabBarItem, TabBarState};
 use crate::termwindow::background::{
-    LoadedBackgroundLayer, load_background_image, reload_background_image,
+    load_background_image, reload_background_image, LoadedBackgroundLayer,
 };
 use crate::termwindow::keyevent::{KeyTableArgs, KeyTableState};
 use crate::termwindow::modal::Modal;
@@ -31,15 +31,15 @@ use crate::termwindow::render::{
 use crate::termwindow::webgpu::WebGpuState;
 use ::wezterm_term::input::{ClickPosition, MouseButton as TMB};
 use ::window::*;
-use anyhow::{Context, anyhow, ensure};
+use anyhow::{anyhow, ensure, Context};
 use config::keyassignment::{
     Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, PaneEncoding, Pattern,
     PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SplitSize,
 };
 use config::window::WindowLevel;
 use config::{
-    AudibleBell, ConfigHandle, Dimension, DimensionContext, FrontEndSelection, GeometryOrigin,
-    GuiPosition, TermConfig, WindowCloseConfirmation, configuration,
+    configuration, AudibleBell, ConfigHandle, Dimension, DimensionContext, FrontEndSelection,
+    GeometryOrigin, GuiPosition, TermConfig, WindowCloseConfirmation,
 };
 use lfucache::*;
 use mlua::{FromLua, LuaSerdeExt, UserData, UserDataFields};
@@ -54,8 +54,8 @@ use mux::tab::{
 use mux::window::WindowId as MuxWindowId;
 use mux::{Mux, MuxNotification};
 use mux_lua::MuxPane;
-use smol::Timer;
 use smol::channel::Sender;
+use smol::Timer;
 use std::cell::{RefCell, RefMut};
 use std::collections::{HashMap, LinkedList};
 use std::ops::Add;
@@ -68,8 +68,8 @@ use std::time::{Duration, Instant};
 use termwiz::hyperlink::Hyperlink;
 use termwiz::surface::SequenceNo;
 use wezterm_dynamic::Value;
-use wezterm_font::FontConfiguration;
 use wezterm_font::units::PixelLength;
+use wezterm_font::FontConfiguration;
 use wezterm_term::color::ColorPalette;
 use wezterm_term::input::LastMouseClick;
 use wezterm_term::{Alert, Progress, StableRowIndex, TerminalConfiguration, TerminalSize};
@@ -1507,9 +1507,9 @@ impl TermWindow {
                         "WebGpu initialization failed; falling back to OpenGL. Error: {:#}",
                         err
                     );
-                    let gl = window.enable_opengl().await.with_context(
-                        || "WebGpu initialization failed and OpenGL fallback also failed",
-                    )?;
+                    let gl = window.enable_opengl().await.with_context(|| {
+                        "WebGpu initialization failed and OpenGL fallback also failed"
+                    })?;
                     (Some(gl), None)
                 }
             },
@@ -2844,7 +2844,11 @@ impl TermWindow {
         );
         let is_light = is_light_color(&pane.palette().background);
         let mut alpha: f32 = if is_scrolled {
-            if is_light { 0.62 } else { 0.54 }
+            if is_light {
+                0.62
+            } else {
+                0.54
+            }
         } else {
             0.0
         };
@@ -2873,7 +2877,11 @@ impl TermWindow {
             }
         }
 
-        if alpha > 0.0 { Some(alpha) } else { None }
+        if alpha > 0.0 {
+            Some(alpha)
+        } else {
+            None
+        }
     }
 
     /// Called by various bits of code to update the title bar.

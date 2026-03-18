@@ -1,5 +1,5 @@
-use crate::TermWindow;
 use crate::termwindow::TermWindowNotif;
+use crate::TermWindow;
 use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
 use mux::pane::Pane;
 use smol::Timer;
