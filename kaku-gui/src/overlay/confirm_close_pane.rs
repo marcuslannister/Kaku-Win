@@ -53,11 +53,6 @@ pub fn confirm_close_tab(
 }
 
 /// Shows a confirmation dialog before closing a window.
-///
-/// Note: This is excluded on macOS (`#[cfg(not(target_os = "macos"))]`) because macOS
-/// provides native window close confirmation dialogs via the AppDelegate, making
-/// this custom overlay redundant on that platform.
-#[cfg(not(target_os = "macos"))]
 pub fn confirm_close_window(
     mut term: TermWizTerminal,
     mux_window_id: WindowId,
