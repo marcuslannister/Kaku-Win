@@ -294,7 +294,9 @@ async fn handle_ws(
     // Send initial screen snapshot
     if let Some(update) = capture_pane(pane_id) {
         if let Ok(json) = serde_json::to_string(&update) {
-            let _ = sender.send(ws::Message::Text(json.into())).await;
+            if let Err(e) = sender.send(ws::Message::Text(json.into())).await {
+                log::debug!("kaku-remote: failed to send initial snapshot for pane {}: {:?}", pane_id, e);
+            }
         }
     }
 
@@ -326,7 +328,9 @@ async fn handle_ws(
         if let Ok(ClientMsg::Input { text: input, .. }) = serde_json::from_str(&text) {
             if let Some(mux) = Mux::try_get() {
                 if let Some(pane) = mux.get_pane(mux::pane::PaneId::from(pane_id)) {
-                    let _ = pane.writer().write_all(input.as_bytes());
+                    if let Err(e) = pane.writer().write_all(input.as_bytes()) {
+                        log::debug!("kaku-remote: failed to write input to pane {}: {}", pane_id, e);
+                    }
                 }
             }
         }
@@ -347,7 +351,9 @@ fn on_pane_output(pane_id: usize, senders: PaneSenders) {
             return;
         }
         if let Some(update) = capture_pane(pane_id) {
-            let _ = tx.send(update);
+            if let Err(e) = tx.send(update) {
+                log::debug!("kaku-remote: failed to broadcast update for pane {}: {:?}", pane_id, e);
+            }
         }
     }
 }
@@ -367,7 +373,9 @@ fn write_state(port: u16, token: &str, tunnel_relay: Option<&str>) {
         val["tunnel_relay"] = serde_json::Value::String(relay.to_string());
     }
     if let Ok(json) = serde_json::to_string(&val) {
-        let _ = std::fs::write(state_path(), json);
+        if let Err(e) = std::fs::write(state_path(), json) {
+            log::warn!("kaku-remote: failed to write state file: {}", e);
+        }
     }
 }
 
@@ -395,9 +403,9 @@ pub fn render_qr_terminal(host: &str, port: u16, token: &str) -> String {
         .render::<qrcode::render::unicode::Dense1x2>()
         .dark_color(qrcode::render::unicode::Dense1x2::Dark)
         .light_color(qrcode::render::unicode::Dense1x2::Light)
-        .quiet_zone(true)
+        .quiet_zone(false)
         .build();
-    format!("{}\n\n{}", rendered, url)
+    format!("{}\n{}", rendered.trim_end(), url)
 }
 
 // ── Relay tunnel ──────────────────────────────────────────────────────────────
@@ -417,9 +425,9 @@ pub fn render_relay_qr_terminal(relay_server: &str, token: &str) -> String {
         .render::<qrcode::render::unicode::Dense1x2>()
         .dark_color(qrcode::render::unicode::Dense1x2::Dark)
         .light_color(qrcode::render::unicode::Dense1x2::Light)
-        .quiet_zone(true)
+        .quiet_zone(false)
         .build();
-    format!("{}\n\n{}", rendered, url)
+    format!("{}\n{}", rendered.trim_end(), url)
 }
 
 /// Start the outbound relay tunnel.  Spawns a dedicated thread with its own
@@ -439,7 +447,9 @@ pub fn start_tunnel(tunnel_url: String) {
                 let pid: usize = pane_id.into();
                 if tx_for_sub.receiver_count() > 0 {
                     if let Some(update) = capture_pane(pid) {
-                        let _ = tx_for_sub.send(update);
+                        if let Err(e) = tx_for_sub.send(update) {
+                            log::debug!("kaku-tunnel: failed to send update: {:?}", e);
+                        }
                     }
                 }
             }
@@ -527,7 +537,9 @@ async fn run_tunnel_session(
                             .and_then(|id| mux.get_pane(mux::pane::PaneId::from(id)))
                             .or_else(|| mux.iter_panes().into_iter().next());
                         if let Some(pane) = target {
-                            let _ = pane.writer().write_all(input.as_bytes());
+                            if let Err(e) = pane.writer().write_all(input.as_bytes()) {
+                                log::debug!("kaku-remote: failed to write to pane: {}", e);
+                            }
                         }
                     }
                 }
@@ -544,6 +556,9 @@ async fn run_tunnel_session(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 pub fn start() {
+    // install_default() returns Err if a provider is already installed; that is fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cfg = configuration();
     if !cfg.remote.enabled {
         return;

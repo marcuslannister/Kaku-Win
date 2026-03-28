@@ -975,7 +975,7 @@ pub struct RemoteConfig {
     pub bind: String,
 
     /// Enable outbound relay tunnel so the phone can connect from outside LAN.
-    #[dynamic(default)]
+    #[dynamic(default = "default_remote_tunnel")]
     pub tunnel: bool,
 
     /// Relay server WebSocket URL.
@@ -1000,13 +1000,17 @@ fn default_tunnel_url() -> String {
     "wss://kaku-relay.fly.dev".to_string()
 }
 
+fn default_remote_tunnel() -> bool {
+    true
+}
+
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             port: default_remote_port(),
             bind: default_remote_bind(),
-            tunnel: false,
+            tunnel: default_remote_tunnel(),
             tunnel_url: default_tunnel_url(),
         }
     }

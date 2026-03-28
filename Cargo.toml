@@ -50,7 +50,7 @@ axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 kaku-remote = { path = "crates/kaku-remote" }
 qrcode = "0.14"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 anyhow = "1.0"
 assert_fs = "1.0.4"
