@@ -1288,6 +1288,7 @@ _kaku_ai_query_accept_line() {
         local query="\${BUFFER:1}"
         query="\${query# }"
         if [[ -n "\$query" ]]; then
+            print -s -- "\${BUFFER}"
             _kaku_set_user_var "kaku_ai_query" "\$query"
             _kaku_ai_waiting=1
             _kaku_ai_waiting_ts=\$EPOCHSECONDS
