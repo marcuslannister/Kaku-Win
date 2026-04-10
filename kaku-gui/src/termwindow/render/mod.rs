@@ -474,7 +474,12 @@ impl crate::TermWindow {
         let block_height = block_metrics.cell_size.height as f32;
         let y_adjust = params.render_metrics.line_height_y_adjust;
         let pos_y = (self.dimensions.pixel_height as f32 / -2.) + params.top_pixel_y;
-        quad.set_position(pos_x, pos_y + y_adjust, pos_x + cell_width, pos_y + y_adjust + block_height);
+        quad.set_position(
+            pos_x,
+            pos_y + y_adjust,
+            pos_x + cell_width,
+            pos_y + y_adjust + block_height,
+        );
         quad.set_hsv(hsv);
         quad.set_fg_color(glyph_color);
         quad.set_texture(sprite);
