@@ -1639,9 +1639,13 @@ fn run_agent(
             }
 
             let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap_or_default();
-            // Extract a clean display hint (path or first string arg, no raw JSON).
+            // Extract a clean display hint. Priority: "query" (web_search/grep), "path", first value.
             let args_preview = args
-                .get("path")
+                .get("query")
+                .or_else(|| args.get("path"))
+                .or_else(|| args.get("url"))
+                .or_else(|| args.get("pattern"))
+                .or_else(|| args.get("command"))
                 .or_else(|| args.as_object().and_then(|o| o.values().next()))
                 .and_then(|v| v.as_str())
                 .map(|s| s.chars().take(40).collect::<String>())
@@ -2389,7 +2393,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         flash_msg.clone()
     } else {
         let suffix = match &app.model_fetch {
-            ModelFetch::Loading => format!(" · {} loading…", app.spinner_char()),
+            ModelFetch::Loading => " · loading…".to_string(),
             ModelFetch::Failed(_) => " · (list failed)".to_string(),
             ModelFetch::Loaded if app.available_models.len() > 1 => {
                 format!(" ({}/{})", app.model_index + 1, app.available_models.len())
@@ -2398,7 +2402,15 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         };
         format!("{}{}", app.current_model(), suffix)
     };
-    let title = format!(" Kaku AI · {} · ⇧⇥ switch · ESC exit ", model_display);
+    let title = format!(
+        " Kaku AI{} · {} · ⇧⇥ switch · ESC exit ",
+        if app.is_streaming || matches!(app.model_fetch, ModelFetch::Loading) {
+            format!(" {}", app.spinner_char())
+        } else {
+            "  ".to_string() // same visual width: 2 spaces = space + spinner (1-col char)
+        },
+        model_display
+    );
     let title_width = unicode_column_width(&title, None);
     let border_fill = inner_w.saturating_sub(title_width);
     let top_line = format!("╭─{}{}─╮", title, "─".repeat(border_fill.saturating_sub(2)));
@@ -2556,21 +2568,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
     } else {
         let prompt = "  > ";
         let input_display = format!("{}{}", prompt, app.input);
-        let input_padded = if app.is_streaming {
-            // Spinner at right edge: [content...][spaces] [spinner]
-            let content_w = inner_w.saturating_sub(2); // reserve 1 space + 1 spinner char
-            let truncated = truncate(&input_display, content_w);
-            let tw = unicode_column_width(&truncated, None);
-            let padding = content_w.saturating_sub(tw);
-            format!(
-                "{}{} {}",
-                truncated,
-                " ".repeat(padding),
-                app.spinner_char()
-            )
-        } else {
-            format!("{:<width$}", input_display, width = inner_w)
-        };
+        let input_padded = format!("{:<width$}", input_display, width = inner_w);
         changes.push(Change::AllAttributes(pal.input_cell()));
         changes.push(Change::Text(truncate(&input_padded, inner_w)));
         changes.push(Change::AllAttributes(pal.border_dim_cell()));

@@ -1382,14 +1382,20 @@ local function build_ai_generate_messages(query, cwd, git_branch)
 end
 
 -- Animates or clears the inline spinner used during `#` AI command generation.
--- Pass clear=true to erase the spinner line; false (or nil) to draw/advance it.
+-- Pass clear=true to erase the spinner and commit `# query` as a permanent
+-- screen line (cursor moves to the next line so ZLE redraws its prompt below,
+-- leaving the query text visible above). Pass false/nil to draw/advance it.
 local function ctrl_ai_generate_spinner(pane, pane_state, clear)
   if not pane_state then
     return
   end
+  local display_query = "# " .. (pane_state.query or "")
   if clear then
     if pane_state.spinner_line_active then
-      pcall(function() pane:inject_output("\r\27[K") end)
+      -- Commit the query as a permanent line and advance cursor to the next
+      -- line. When ZLE subsequently redraws after \x15, it draws its prompt on
+      -- this new line, leaving `# query` untouched above.
+      pcall(function() pane:inject_output("\r\27[K" .. display_query .. "\r\n") end)
       pane_state.spinner_line_active = false
     end
     return
@@ -1402,14 +1408,14 @@ local function ctrl_ai_generate_spinner(pane, pane_state, clear)
   if not pane_state.spinner_line_active then
     local frame = frames[(pane_state.spinner_frame % n) + 1]
     pcall(function()
-      pane:inject_output("\r\27[K\27[38;5;244m" .. frame .. "\27[0m")
+      pane:inject_output("\r\27[K" .. display_query .. " \27[38;5;244m" .. frame .. "\27[0m")
     end)
     pane_state.spinner_line_active = true
   else
     pane_state.spinner_frame = (pane_state.spinner_frame + 1) % n
     local frame = frames[pane_state.spinner_frame + 1]
     pcall(function()
-      pane:inject_output("\r\27[K\27[38;5;244m" .. frame .. "\27[0m")
+      pane:inject_output("\r\27[K" .. display_query .. " \27[38;5;244m" .. frame .. "\27[0m")
     end)
   end
 end
@@ -3130,6 +3136,7 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   pane_state.pending_job_id = nil
   pane_state.spinner_frame = 0
   pane_state.spinner_line_active = false
+  pane_state.query = query:gsub("[%c]", "")
 
   local cwd = pane_cwd(pane)
   local git_branch = detect_git_branch(cwd)
