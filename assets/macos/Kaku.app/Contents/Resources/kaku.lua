@@ -1270,7 +1270,7 @@ local function inject_ai_status(pane, message)
 
   local summary = normalize_ai_summary(message or "", "Checking this error now.")
   local line = "\27[38;5;141m╰─ Kaku Assistant\27[0m  \27[38;5;244m" .. summary .. "\27[0m"
-  local output = "\r\n" .. line .. "\r\n"
+  local output = "\r\n" .. line .. "\r\n\r\n"
   pcall(function()
     pane:inject_output(output)
   end)
@@ -1501,8 +1501,33 @@ local function poll_ai_generate_job(window, pane, pane_id, job)
   pane_state.inflight = false
   pane_state.pending_job_id = nil
 
+  -- Retry helper: attempt one silent retry for transient API failures.
+  local function retry_or_fail(log_msg)
+    pane_state.retry_count = (pane_state.retry_count or 0)
+    if pane_state.retry_count < 1 then
+      pane_state.retry_count = pane_state.retry_count + 1
+      ai_debug_log("ai_generate_job retry pane_id=" .. pane_id .. " reason=" .. log_msg)
+      local query = pane_state.query or ""
+      local cwd = pane_state.cwd or ""
+      local git_branch = pane_state.git_branch or ""
+      pane_state.inflight = true
+      pane_state.spinner_frame = 0
+      local ok, err = request_ai_generate_async(window, pane, pane_id, query, cwd, git_branch)
+      if not ok then
+        pane_state.inflight = false
+        ai_debug_log("ai_generate_job retry failed err=" .. tostring(err))
+        ctrl_ai_generate_spinner(pane, pane_state, true)
+        safe_send_clear(pane)
+        inject_ai_status_and_finalize(pane, "Could not generate command right now.")
+      end
+      return true
+    end
+    return false
+  end
+
   if status_code ~= 0 then
     ai_debug_log("ai_generate_job failed pane_id=" .. pane_id .. " status=" .. tostring(status_code) .. " err=" .. tostring(stderr))
+    if retry_or_fail("non_zero_exit") then return end
     ctrl_ai_generate_spinner(pane, pane_state, true)
     safe_send_clear(pane)
     inject_ai_status_and_finalize(pane, "Could not generate command right now.")
@@ -1512,6 +1537,7 @@ local function poll_ai_generate_job(window, pane, pane_id, job)
   local result, parse_err = parse_ai_fix_response(stdout)
   if not result then
     ai_debug_log("ai_generate_job invalid_response pane_id=" .. pane_id .. " err=" .. tostring(parse_err))
+    if retry_or_fail("invalid_response") then return end
     ctrl_ai_generate_spinner(pane, pane_state, true)
     safe_send_clear(pane)
     inject_ai_status_and_finalize(pane, "Could not generate command right now.")
@@ -3172,10 +3198,13 @@ wezterm.on('user-var-changed', function(window, pane, name, value)
   pane_state.pending_job_id = nil
   pane_state.spinner_frame = 0
   pane_state.spinner_line_active = false
+  pane_state.retry_count = 0
   pane_state.query = query:gsub("[%c]", "")
 
   local cwd = pane_cwd(pane)
   local git_branch = detect_git_branch(cwd)
+  pane_state.cwd = cwd
+  pane_state.git_branch = git_branch
   local ok, err = request_ai_generate_async(window, pane, pane_id, query, cwd, git_branch)
   if not ok then
     pane_state.inflight = false

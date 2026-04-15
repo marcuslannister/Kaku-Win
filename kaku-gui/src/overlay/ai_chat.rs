@@ -2403,7 +2403,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         format!("{}{}", app.current_model(), suffix)
     };
     let title = format!(
-        " Kaku AI{} · {} · ⇧⇥ switch · ESC exit ",
+        " Kaku AI{} {} · ⇧⇥ switch · ESC exit ",
         if app.is_streaming || matches!(app.model_fetch, ModelFetch::Loading) {
             format!(" {}", app.spinner_char())
         } else {
@@ -2534,15 +2534,31 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         }
         push_picker_row(&mut changes, sep_row, inner_w, pal, runs);
     } else {
+        // No active picker: show available context-attachment hints so users
+        // discover the @ prefix without having to guess.
         changes.push(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Absolute(sep_row),
         });
-        changes.push(Change::AllAttributes(pal.border_dim_cell()));
-        changes.push(Change::Text(format!(
-            "├{}┤",
-            "─".repeat(inner_w.saturating_sub(0))
-        )));
+        let hint_options = app.available_attachment_options();
+        if hint_options.is_empty() {
+            changes.push(Change::AllAttributes(pal.border_dim_cell()));
+            changes.push(Change::Text(format!(
+                "├{}┤",
+                "─".repeat(inner_w.saturating_sub(0))
+            )));
+        } else {
+            let tokens: String = hint_options
+                .iter()
+                .map(|o| o.label)
+                .collect::<Vec<_>>()
+                .join("  ");
+            let hint = format!("  {}  ·  type @ to attach  ", tokens);
+            let hint_width = unicode_column_width(&hint, None);
+            let fill = "─".repeat(inner_w.saturating_sub(2 + hint_width.min(inner_w)));
+            changes.push(Change::AllAttributes(pal.border_dim_cell()));
+            changes.push(Change::Text(format!("├─{}{}┤", hint, fill)));
+        }
     }
 
     // 5. Input row — or approval prompt when agent is waiting for confirmation.
@@ -3342,12 +3358,16 @@ fn shell_tokens_are_dangerous(tokens: &[String]) -> bool {
         return true;
     }
     match cmd {
-        // Shell/interpreter invoked with an inline script (-c / -lc / -ic etc.) can run anything.
-        "bash" | "sh" | "zsh" | "fish" | "python" | "python3" | "perl" | "ruby" | "node" => {
+        // Shell/interpreter invoked with an inline script can run arbitrary code.
+        // bash/sh/zsh/fish/python use -c for inline scripts.
+        "bash" | "sh" | "zsh" | "fish" | "python" | "python3" => {
             tokens.iter().skip(1).any(|t| {
                 t == "-c" || (t.starts_with('-') && !t.starts_with("--") && t[1..].contains('c'))
             })
         }
+        // perl/ruby use -e for inline eval; -c is a safe syntax-check only flag.
+        // node uses -e for inline eval; --check is a safe syntax-check only flag.
+        "perl" | "ruby" | "node" => tokens.iter().skip(1).any(|t| t == "-e"),
         "rm" => rm_is_dangerous(tokens),
         "find" => find_is_dangerous(tokens),
         "git" => git_is_dangerous(tokens),
