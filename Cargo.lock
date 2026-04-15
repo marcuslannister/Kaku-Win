@@ -2846,6 +2846,7 @@ dependencies = [
  "env-bootstrap",
  "hostname",
  "humantime",
+ "kaku-ai-utils",
  "kaku-remote",
  "log",
  "mux",
@@ -2872,6 +2873,10 @@ dependencies = [
  "wezterm-version",
  "winapi",
 ]
+
+[[package]]
+name = "kaku-ai-utils"
+version = "0.1.0"
 
 [[package]]
 name = "kaku-gui"
@@ -2904,6 +2909,7 @@ dependencies = [
  "http_req",
  "image",
  "k9",
+ "kaku-ai-utils",
  "kaku-remote",
  "lazy_static",
  "lfucache",

@@ -259,7 +259,7 @@ impl AiClient {
         let mut out: Vec<String> = arr
             .iter()
             .filter_map(|m| m.get("id").and_then(|s| s.as_str()).map(String::from))
-            .filter(|id| is_chat_model_id(id))
+            .filter(|id| kaku_ai_utils::is_chat_model_id(id))
             .collect();
         out.sort();
         out.dedup();
@@ -347,7 +347,15 @@ impl AiClient {
 
             let delta = &choice["delta"];
 
-            // Text delta.
+            // Text delta (standard) and reasoning delta (DeepSeek et al.).
+            if let Some(reasoning) = delta["reasoning_content"]
+                .as_str()
+                .or_else(|| choice["reasoning"].as_str())
+            {
+                if !reasoning.is_empty() {
+                    on_token(&format!("<think>\n{}\n</think>\n\n", reasoning));
+                }
+            }
             if let Some(content) = delta["content"].as_str() {
                 on_token(content);
             }
@@ -397,24 +405,4 @@ struct ToolCallBuf {
     arguments: String,
 }
 
-/// Returns false for model IDs that are clearly not conversational (embeddings,
-/// TTS, image generation, ASR, moderation). Everything else is assumed to be a
-/// chat model.
-// Keep in sync with kaku/src/ai_config/tui.rs::is_chat_model_id (cross-binary copy).
-fn is_chat_model_id(id: &str) -> bool {
-    const BLOCK: &[&str] = &[
-        "whisper",
-        "tts",
-        "dall-e",
-        "dalle",
-        "embedding",
-        "moderation",
-        "audio",
-        "image",
-        "davinci",
-        "babbage",
-        "ada-",
-    ];
-    let lower = id.to_ascii_lowercase();
-    !BLOCK.iter().any(|p| lower.contains(p))
-}
+// Delegated to kaku-ai-utils crate to avoid cross-binary drift.

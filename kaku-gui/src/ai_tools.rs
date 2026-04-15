@@ -747,6 +747,9 @@ pub fn execute(
                 .unwrap_or(0)
         ));
         let note = if std::fs::write(&tmp_path, result.as_bytes()).is_ok() {
+            if let Ok(mut registry) = SPILL_FILES.lock() {
+                registry.push(tmp_path.clone());
+            }
             format!(
                 "\n[... output truncated at {} bytes. Full content saved to {} — use fs_read to access it.]",
                 MAX_RESULT_BYTES,
@@ -758,6 +761,19 @@ pub fn execute(
         Ok(format!("{}{}", truncated, note))
     } else {
         Ok(result)
+    }
+}
+
+// ─── Spill-file cleanup ───────────────────────────────────────────────────────
+
+static SPILL_FILES: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Remove all temp spill files created during this session.
+pub fn cleanup_spill_files() {
+    if let Ok(mut files) = SPILL_FILES.lock() {
+        for path in files.drain(..) {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -1022,18 +1038,7 @@ fn exec_grep_search(
         .arg("--version")
         .output()
         .is_ok();
-    let abs_path = if search_path.starts_with("~/") || search_path == "~" {
-        let home = std::env::var("HOME").context("HOME not set")?;
-        if search_path == "~" {
-            home
-        } else {
-            format!("{}/{}", home, &search_path[2..])
-        }
-    } else if search_path.starts_with('/') {
-        search_path.to_string()
-    } else {
-        format!("{}/{}", cwd, search_path)
-    };
+    let abs_path = resolve(search_path, cwd)?.to_string_lossy().into_owned();
 
     let mut cmd = if rg {
         let mut c = std::process::Command::new("rg");
@@ -1276,5 +1281,104 @@ fn exec_read_url(url: &str, provider: &str, api_key: &str) -> Result<String> {
         }
         // Brave and unknown providers: fall back to generic markdown fetchers.
         _ => fetch_markdown_default(url),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn dummy_config() -> AssistantConfig {
+        AssistantConfig {
+            api_key: "test".to_string(),
+            chat_model: "test".to_string(),
+            chat_model_choices: vec![],
+            base_url: "https://example.com".to_string(),
+            chat_tools_enabled: false,
+            web_search_provider: None,
+            web_search_api_key: None,
+            web_fetch_script: None,
+        }
+    }
+
+    #[test]
+    fn resolve_expands_tilde() {
+        let home = std::env::var("HOME").expect("HOME not set");
+        assert_eq!(
+            resolve("~/foo", "/tmp").unwrap(),
+            PathBuf::from(&home).join("foo")
+        );
+        assert_eq!(resolve("~", "/tmp").unwrap(), PathBuf::from(&home));
+    }
+
+    #[test]
+    fn resolve_absolute_unchanged() {
+        assert_eq!(
+            resolve("/etc/passwd", "/tmp").unwrap(),
+            PathBuf::from("/etc/passwd")
+        );
+    }
+
+    #[test]
+    fn resolve_relative_to_cwd() {
+        assert_eq!(
+            resolve("src/main.rs", "/project").unwrap(),
+            PathBuf::from("/project/src/main.rs")
+        );
+    }
+
+    #[test]
+    fn fs_read_caps_large_files() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let huge = "x".repeat(MAX_RESULT_BYTES + 2000);
+        tmp.write_all(huge.as_bytes()).unwrap();
+        let path = tmp.path().to_string_lossy();
+        let args = serde_json::json!({"path": path.to_string()});
+        let mut cwd = "/tmp".to_string();
+        let result = execute("fs_read", &args, &mut cwd, &dummy_config()).unwrap();
+        assert!(
+            result.contains("truncated at"),
+            "expected truncation note in result"
+        );
+        // Truncated text + spill note should be a bit above MAX_RESULT_BYTES.
+        assert!(result.len() > MAX_RESULT_BYTES && result.len() < MAX_RESULT_BYTES + 500);
+    }
+
+    #[test]
+    fn fs_list_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let args = serde_json::json!({"path": dir.path().to_string_lossy().to_string()});
+        let mut cwd = "/tmp".to_string();
+        let result = execute("fs_list", &args, &mut cwd, &dummy_config()).unwrap();
+        assert!(
+            result.contains("a.txt"),
+            "expected a.txt in listing: {}",
+            result
+        );
+        assert!(
+            result.contains("sub/"),
+            "expected sub/ in listing: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn grep_search_finds_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.txt"), "hello world\nfoo bar\n").unwrap();
+        let args = serde_json::json!({
+            "pattern": "hello",
+            "path": dir.path().to_string_lossy().to_string()
+        });
+        let mut cwd = "/tmp".to_string();
+        let result = execute("grep_search", &args, &mut cwd, &dummy_config()).unwrap();
+        assert!(
+            result.contains("hello world"),
+            "expected match in result: {}",
+            result
+        );
     }
 }

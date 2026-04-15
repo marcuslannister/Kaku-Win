@@ -36,6 +36,7 @@ embed-resource.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+kaku-ai-utils.workspace = true
 bitflags.workspace = true
 bytemuck.workspace = true
 chrono.workspace = true

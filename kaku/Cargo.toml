@@ -12,6 +12,7 @@ remote = ["dep:kaku-remote"]
 
 [dependencies]
 anyhow.workspace = true
+kaku-ai-utils.workspace = true
 kaku-remote = { workspace = true, optional = true }
 base64.workspace = true
 chrono.workspace = true

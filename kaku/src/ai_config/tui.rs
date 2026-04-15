@@ -2796,25 +2796,7 @@ fn get_kaku_assistant_api_key() -> Option<String> {
     }
 }
 
-/// Filter out non-chat model IDs (embeddings, TTS, image generation, etc.).
-// Keep in sync with kaku-gui/src/ai_client.rs::is_chat_model_id (cross-binary copy).
-fn is_chat_model_id(id: &str) -> bool {
-    const BLOCK: &[&str] = &[
-        "whisper",
-        "tts",
-        "dall-e",
-        "dalle",
-        "embedding",
-        "moderation",
-        "audio",
-        "image",
-        "davinci",
-        "babbage",
-        "ada-",
-    ];
-    let lower = id.to_ascii_lowercase();
-    !BLOCK.iter().any(|p| lower.contains(p))
-}
+// Delegated to kaku-ai-utils crate to avoid cross-binary drift.
 
 fn parse_assistant_models_cache(path: &Path, base_url: &str) -> Option<Vec<String>> {
     let raw = std::fs::read_to_string(path).ok()?;
@@ -2919,7 +2901,7 @@ fn fetch_kaku_assistant_models(api_key: &str, base_url: &str) -> Vec<String> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| m.get("id").and_then(|s| s.as_str()).map(String::from))
-                .filter(|id| is_chat_model_id(id))
+                .filter(|id| kaku_ai_utils::is_chat_model_id(id))
                 .collect()
         })
         .unwrap_or_default();
