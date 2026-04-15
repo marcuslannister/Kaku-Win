@@ -153,10 +153,9 @@ fn shell_tokens_are_dangerous(tokens: &[String]) -> bool {
 
     match cmd {
         // Pure read-only informational commands — no filesystem writes possible.
-        "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep"
-        | "which" | "whereis" | "cut" | "uniq" | "nl" | "stat" | "file"
-        | "realpath" | "readlink" | "basename" | "dirname" | "echo" | "tr"
-        | "awk" => false,
+        "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "which" | "whereis"
+        | "cut" | "uniq" | "nl" | "stat" | "file" | "realpath" | "readlink" | "basename"
+        | "dirname" | "echo" | "tr" | "awk" => false,
 
         // sed: in-place edit (-i) modifies files; flag-less usage is a filter (safe).
         "sed" => tokens
@@ -183,10 +182,9 @@ fn shell_tokens_are_dangerous(tokens: &[String]) -> bool {
         "node" => !tokens.iter().skip(1).any(|t| t == "--check"),
 
         // bash/sh/zsh/fish/python with -c runs arbitrary code.
-        "bash" | "sh" | "zsh" | "fish" | "python" | "python3" => tokens
-            .iter()
-            .skip(1)
-            .any(|t| t == "-c" || (t.starts_with('-') && !t.starts_with("--") && t[1..].contains('c'))),
+        "bash" | "sh" | "zsh" | "fish" | "python" | "python3" => tokens.iter().skip(1).any(|t| {
+            t == "-c" || (t.starts_with('-') && !t.starts_with("--") && t[1..].contains('c'))
+        }),
 
         // Build tools: compile/test but do not modify project source files.
         "cargo" | "make" => false,
@@ -256,9 +254,10 @@ fn git_is_read_only(tokens: &[String]) -> bool {
             !tokens.iter().skip(2).any(|t| !t.starts_with('-'))
         }
         Some("tag") => {
-            let has_write_flag = tokens.iter().skip(2).any(|t| {
-                t == "-d" || t == "-D" || t == "--delete"
-            });
+            let has_write_flag = tokens
+                .iter()
+                .skip(2)
+                .any(|t| t == "-d" || t == "-D" || t == "--delete");
             if has_write_flag {
                 return false;
             }
@@ -272,9 +271,11 @@ fn git_is_read_only(tokens: &[String]) -> bool {
         Some("remote") => {
             // git remote (no args) or git remote -v is read-only.
             // git remote add/remove/rename/set-url is a write.
-            !tokens.iter().skip(2).any(|t| {
-                t == "add" || t == "remove" || t == "rename" || t == "set-url"
-            }) && !tokens.iter().skip(2).any(|t| !t.starts_with('-'))
+            !tokens
+                .iter()
+                .skip(2)
+                .any(|t| t == "add" || t == "remove" || t == "rename" || t == "set-url")
+                && !tokens.iter().skip(2).any(|t| !t.starts_with('-'))
         }
         Some("stash") => tokens.get(2).map(String::as_str) == Some("list"),
         // Everything else (checkout, add, commit, push, reset, clean, etc.) modifies state.

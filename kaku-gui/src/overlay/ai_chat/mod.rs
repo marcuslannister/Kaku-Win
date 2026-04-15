@@ -2310,7 +2310,10 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
     if let Some((summary, reply_tx)) = app.pending_approval.take() {
         let is_approve = matches!(
             (&key.key, key.modifiers),
-            (KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter, Modifiers::NONE)
+            (
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter,
+                Modifiers::NONE
+            )
         );
         let is_reject = matches!(
             (&key.key, key.modifiers),
