@@ -2,7 +2,7 @@
 use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
 use crate::colorease::ColorEase;
-use crate::frontend::{front_end, try_front_end};
+use crate::frontend::{front_end, refresh_fast_config_snapshot, try_front_end};
 use crate::inputmap::InputMap;
 use crate::overlay::launcher::LauncherTabEntry;
 use crate::overlay::{
@@ -4105,7 +4105,10 @@ impl TermWindow {
                 }
             }
             Nop | DisableDefaultAssignment => {}
-            ReloadConfiguration => {}
+            ReloadConfiguration => {
+                config::reload();
+                refresh_fast_config_snapshot();
+            }
             MoveTab(n) => self.move_tab(*n)?,
             MoveTabRelative(n) => self.move_tab_relative(*n)?,
             ScrollByPage(n) => self.scroll_by_page(**n, pane)?,

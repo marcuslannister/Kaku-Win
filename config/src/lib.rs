@@ -1042,6 +1042,15 @@ struct ConfigInner {
     generation: usize,
     watcher: Option<notify::RecommendedWatcher>,
     watched_paths: std::collections::HashSet<PathBuf>,
+    // Set of file paths we care about, shared with the watcher thread so it
+    // can filter parent-directory events down to just the target files.
+    watched_files: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
+    // Maps a watched file path to the parent directory physically registered
+    // with the OS watcher (for unwatch bookkeeping).
+    file_to_dir: HashMap<PathBuf, PathBuf>,
+    // Reference-counts how many watched files live in each watched directory.
+    // The directory is unwatched when its count reaches zero.
+    dir_watch_count: HashMap<PathBuf, usize>,
     defer_watchers_until_enabled: bool,
     pending_watch_paths: Vec<PathBuf>,
     subscribers: HashMap<usize, Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -1056,6 +1065,9 @@ impl ConfigInner {
             generation: 0,
             watcher: None,
             watched_paths: std::collections::HashSet::new(),
+            watched_files: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            file_to_dir: HashMap::new(),
+            dir_watch_count: HashMap::new(),
             defer_watchers_until_enabled: false,
             pending_watch_paths: vec![],
             subscribers: HashMap::new(),
@@ -1094,17 +1106,33 @@ impl ConfigInner {
         if self.watcher.is_none() {
             let (tx, rx) = std::sync::mpsc::channel();
             const DELAY: Duration = Duration::from_millis(100);
+            // Share the watched-file set with the event thread so it can filter
+            // parent-directory events to only the files we care about.
+            let watched_files = Arc::clone(&self.watched_files);
             match notify::recommended_watcher(tx) {
                 Ok(watcher) => {
                     std::thread::spawn(move || {
                         use notify::EventKind;
 
-                        fn extract_path(event: notify::Event) -> Vec<PathBuf> {
-                            match event.kind {
+                        fn extract_path(
+                            event: notify::Event,
+                            watched_files: &std::sync::Mutex<
+                                std::collections::HashSet<PathBuf>,
+                            >,
+                        ) -> Vec<PathBuf> {
+                            let paths = match event.kind {
                                 EventKind::Modify(_)
                                 | EventKind::Create(_)
                                 | EventKind::Remove(_) => event.paths,
-                                _ => vec![],
+                                _ => return vec![],
+                            };
+                            // Filter to only the specific files we care about.
+                            // This prevents unrelated files in the same directory
+                            // from triggering spurious reloads.
+                            if let Ok(set) = watched_files.lock() {
+                                paths.into_iter().filter(|p| set.contains(p)).collect()
+                            } else {
+                                paths
                             }
                         }
 
@@ -1112,13 +1140,14 @@ impl ConfigInner {
                             log::debug!("config watcher event: {:?}", event);
                             match event {
                                 Ok(event) => {
-                                    let mut paths = extract_path(event);
+                                    let mut paths = extract_path(event, &watched_files);
                                     if !paths.is_empty() {
                                         // Grace period to allow events to settle
                                         std::thread::sleep(DELAY);
                                         // Drain any other immediately ready events
                                         while let Ok(Ok(event)) = rx.try_recv() {
-                                            paths.append(&mut extract_path(event));
+                                            paths
+                                                .append(&mut extract_path(event, &watched_files));
                                         }
                                         paths.sort();
                                         paths.dedup();
@@ -1149,18 +1178,64 @@ impl ConfigInner {
         if self.watched_paths.contains(&path) {
             return;
         }
-        if let Some(watcher) = self.watcher.as_mut() {
-            use notify::Watcher;
-            match watcher.watch(&path, notify::RecursiveMode::NonRecursive) {
-                Ok(()) => {
-                    log::trace!("watching config path: {}", path.display());
-                    self.watched_paths.insert(path);
+
+        if path.is_file() {
+            // For regular files, watch the parent directory instead of the file
+            // itself. This ensures atomic-rename saves (used by vim, VS Code,
+            // JetBrains, etc.) are detected even though they replace the inode.
+            // The event thread filters parent-directory events by file name.
+            let dir = match path.parent() {
+                Some(d) => d.to_path_buf(),
+                None => path.clone(),
+            };
+            if let Ok(mut set) = self.watched_files.lock() {
+                set.insert(path.clone());
+            }
+            self.file_to_dir.insert(path.clone(), dir.clone());
+            let count = self.dir_watch_count.entry(dir.clone()).or_insert(0);
+            *count += 1;
+            let first_in_dir = *count == 1;
+            if first_in_dir {
+                if let Some(watcher) = self.watcher.as_mut() {
+                    use notify::Watcher;
+                    match watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+                        Ok(()) => {
+                            log::trace!("watching config dir: {}", dir.display());
+                        }
+                        Err(err) => {
+                            log::warn!("Failed to watch config dir {}: {:#}", dir.display(), err);
+                            // Roll back registrations on failure
+                            if let Ok(mut set) = self.watched_files.lock() {
+                                set.remove(&path);
+                            }
+                            self.file_to_dir.remove(&path);
+                            if let Some(c) = self.dir_watch_count.get_mut(&dir) {
+                                *c -= 1;
+                                if *c == 0 {
+                                    self.dir_watch_count.remove(&dir);
+                                }
+                            }
+                            return;
+                        }
+                    }
                 }
-                Err(err) => {
-                    log::warn!("Failed to watch config path {}: {:#}", path.display(), err);
+            }
+        } else {
+            // For directories or non-existent paths, watch the path directly.
+            if let Some(watcher) = self.watcher.as_mut() {
+                use notify::Watcher;
+                match watcher.watch(&path, notify::RecursiveMode::NonRecursive) {
+                    Ok(()) => {
+                        log::trace!("watching config path: {}", path.display());
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to watch config path {}: {:#}", path.display(), err);
+                        return;
+                    }
                 }
             }
         }
+        self.watched_paths.insert(path);
     }
 
     /// Unwatch paths that are no longer in the active watch set.
@@ -1172,10 +1247,30 @@ impl ConfigInner {
             .cloned()
             .collect();
         for path in stale {
-            if let Some(watcher) = self.watcher.as_mut() {
-                use notify::Watcher;
-                if let Err(err) = watcher.unwatch(&path) {
-                    log::warn!("Failed to unwatch {}: {:#}", path.display(), err);
+            if let Some(dir) = self.file_to_dir.remove(&path) {
+                // Was a file watch: remove from filter set, decrement dir refcount.
+                if let Ok(mut set) = self.watched_files.lock() {
+                    set.remove(&path);
+                }
+                if let Some(count) = self.dir_watch_count.get_mut(&dir) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.dir_watch_count.remove(&dir);
+                        if let Some(watcher) = self.watcher.as_mut() {
+                            use notify::Watcher;
+                            if let Err(err) = watcher.unwatch(&dir) {
+                                log::warn!("Failed to unwatch dir {}: {:#}", dir.display(), err);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Was a direct path watch (directory or non-existent path).
+                if let Some(watcher) = self.watcher.as_mut() {
+                    use notify::Watcher;
+                    if let Err(err) = watcher.unwatch(&path) {
+                        log::warn!("Failed to unwatch {}: {:#}", path.display(), err);
+                    }
                 }
             }
             self.watched_paths.remove(&path);

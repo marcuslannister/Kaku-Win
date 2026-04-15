@@ -1776,10 +1776,9 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             }
         }
         ReloadConfiguration => CommandDef {
-            brief: "Reload configuration (disabled)".into(),
-            doc: "Manual reload is disabled; configuration changes are reloaded automatically."
-                .into(),
-            keys: vec![],
+            brief: "Reload Configuration".into(),
+            doc: "Reloads the configuration file.".into(),
+            keys: vec![(Modifiers::SUPER | Modifiers::SHIFT, "R".into())],
             args: &[],
             menubar: &[],
             icon: None,
