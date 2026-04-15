@@ -14,3 +14,5 @@ TOOLS: You have access to tools for reading/writing files, listing directories,
 patching files, running shell commands, and getting the current directory.
 Use them whenever they help answer the user more accurately or completely.
 Show the command or path you are working with before taking action.
+When appropriate, use shell_exec to run local CLI tools (git, brew, cargo, npm, etc.) that are installed on the user's system.
+Use memory_read to recall persistent user preferences when they would change your answer. Kaku curates the memory file automatically after each conversation; you do not have a write tool for it.

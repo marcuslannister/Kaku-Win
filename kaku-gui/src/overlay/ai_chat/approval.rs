@@ -2,7 +2,7 @@ use crate::ai_client::ApiMessage;
 use crate::overlay::ai_chat::TerminalContext;
 
 /// requiring user approval before execution. Returns None for read-only tools
-/// (fs_read, fs_list, fs_search, pwd, shell_poll).
+/// (fs_read, fs_list, fs_search, pwd, shell_poll, memory_read).
 pub(crate) fn approval_summary(name: &str, args: &serde_json::Value) -> Option<String> {
     let s = |k: &str| {
         args[k]

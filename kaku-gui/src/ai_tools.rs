@@ -63,6 +63,21 @@ pub struct ToolDef {
     pub parameters: serde_json::Value,
 }
 
+/// Returns the path to the local memory file used by memory_read / curator writes.
+pub(crate) fn memory_file_path() -> std::path::PathBuf {
+    kaku_config_dir().join("ai_chat_memory.md")
+}
+
+/// Presence of this file means the user has already seen the onboarding greeting.
+pub(crate) fn onboarding_flag_path() -> std::path::PathBuf {
+    kaku_config_dir().join("ai_chat_onboarded")
+}
+
+fn kaku_config_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config").join("kaku")
+}
+
 /// All tools exposed to the model, filtered by the active configuration.
 pub fn all_tools(config: &AssistantConfig) -> Vec<ToolDef> {
     let mut tools = vec![
@@ -140,8 +155,10 @@ pub fn all_tools(config: &AssistantConfig) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "shell_exec",
-            description: Cow::Borrowed("Run an arbitrary shell command via bash and return stdout + stderr. \
-                          Use for building, testing, grepping, git, npm, cargo, etc."),
+            description: Cow::Borrowed(
+                "Run an arbitrary shell command via bash and return stdout + stderr. \
+                 Use for building, testing, grepping, git, npm, cargo, etc.",
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -326,6 +343,24 @@ pub fn all_tools(config: &AssistantConfig) -> Vec<ToolDef> {
                 }
             },
             "required": ["pattern"]
+        }),
+    });
+
+    // memory_read: read-only access to the local memory file. Writes are handled
+    // exclusively by the background curator in agent::maybe_extract_memories so
+    // there is a single writer and no race on the file.
+    tools.push(ToolDef {
+        name: "memory_read",
+        description: Cow::Borrowed(
+            "Read the user's local memory file that stores persistent facts, \
+             preferences, and project context across AI chat sessions. \
+             Kaku updates this file automatically after each conversation; \
+             you do not need to write to it yourself.",
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "required": []
         }),
     });
 
@@ -714,6 +749,13 @@ pub fn execute(
                 max_results,
                 cwd,
             )?
+        }
+        "memory_read" => {
+            let path = memory_file_path();
+            match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(_) => "(no memories yet)".into(),
+            }
         }
         "http_request" => {
             let method = args["method"].as_str().context("missing method")?;
@@ -1299,6 +1341,7 @@ mod tests {
             web_search_provider: None,
             web_search_api_key: None,
             web_fetch_script: None,
+            memory_curator_model: None,
         }
     }
 
