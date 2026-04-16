@@ -27,7 +27,10 @@ mod approval;
 mod markdown;
 
 pub(crate) use agent::{generate_summary, maybe_extract_memories, run_agent};
-pub(crate) use approval::{approval_summary, build_system_prompt, build_visible_snapshot_message};
+pub(crate) use approval::{
+    approval_summary, build_environment_message, build_system_prompt,
+    build_visible_snapshot_message,
+};
 pub(crate) use markdown::{
     parse_markdown_blocks, segments_to_plain, tokenize_inline, wrap_segments,
 };
@@ -130,6 +133,15 @@ pub struct TerminalContext {
     pub tab_snapshot: String,
     pub selected_text: String,
     pub colors: ChatPalette,
+
+    /// Exit code of the last command (from OSC 133 D), if available.
+    /// None means either no command has run yet, or shell integration is not active.
+    pub last_exit_code: Option<i32>,
+
+    /// Output lines from the last command (from OSC 133 C to D), if available.
+    /// Only populated when last_exit_code.is_some() && last_exit_code != 0.
+    /// Capped at 50 lines to avoid context overflow.
+    pub last_command_output: Option<Vec<String>>,
 }
 
 // ─── Message model ───────────────────────────────────────────────────────────
@@ -284,9 +296,14 @@ pub(crate) enum ModelFetch {
 /// Maximum number of user+assistant exchange pairs to include in API context.
 const MAX_HISTORY_PAIRS: usize = 10;
 
+/// Maximum number of messages kept in the in-memory display list. When this is
+/// exceeded the oldest messages are dropped so long sessions do not accumulate
+/// unbounded RAM. Only chat messages count; tool events are included.
+const MAX_DISPLAY_MESSAGES: usize = 300;
+
 const SPINNER_FRAMES: &[&str] = &["◌", "◎", "◉", "●", "◉", "◎"];
 /// Milliseconds between spinner frame advances.
-const SPINNER_INTERVAL_MS: u128 = 80;
+const SPINNER_INTERVAL_MS: u128 = 50;
 
 /// UI mode: normal chat or conversation picker.
 pub(crate) enum AppMode {
@@ -359,6 +376,8 @@ pub(crate) struct App {
     /// True until the user submits their first message in a brand-new session.
     /// Cleared (and flag file created) on first submit so onboarding never repeats.
     pub(crate) onboarding_pending: bool,
+    /// User pressed Enter while streaming; auto-submit input when stream ends.
+    pub(crate) queued_submit: bool,
 }
 
 impl App {
@@ -424,11 +443,6 @@ impl App {
                 }
             })
             .collect();
-        // Add a blank separator so the welcome message doesn't stick to the last exchange.
-        if !messages.is_empty() {
-            messages.push(Message::text(Role::Assistant, "", true, true));
-        }
-
         // Onboarding: fire when neither the memory file nor the flag file exist.
         // Both files live under ~/.config/kaku/; presence of either means the user
         // has been through setup before (memory exists) or has already seen the
@@ -482,6 +496,7 @@ impl App {
             spinner_frame: 0,
             spinner_tick: Instant::now(),
             onboarding_pending,
+            queued_submit: false,
         }
     }
 
@@ -497,6 +512,14 @@ impl App {
         } else {
             false
         }
+    }
+
+    fn has_pending_tool(&self) -> bool {
+        self.messages
+            .iter()
+            .rev()
+            .take(16)
+            .any(|m| m.is_tool() && !m.complete)
     }
 
     fn current_model(&self) -> String {
@@ -755,17 +778,17 @@ impl App {
                 },
             });
 
-            let content_to_render = if msg.content.is_empty() && !msg.complete {
-                "▋".to_string()
+            if msg.role == Role::Assistant && msg.content.is_empty() && !msg.complete {
+                // Waiting for first token: show pulsing dot instead of ▋ placeholder.
+                // No trailing Blank so the dot sits flush below the AI header.
+                lines.push(DisplayLine::LoadingDot);
             } else {
-                msg.content.clone()
-            };
-
-            match msg.role {
-                Role::User => emit_user_lines(&mut lines, &content_to_render, w),
-                Role::Assistant => emit_assistant_markdown(&mut lines, &content_to_render, w),
+                match msg.role {
+                    Role::User => emit_user_lines(&mut lines, &msg.content, w),
+                    Role::Assistant => emit_assistant_markdown(&mut lines, &msg.content, w),
+                }
+                lines.push(DisplayLine::Blank);
             }
-            lines.push(DisplayLine::Blank);
         }
 
         // Tools still running with no AI text yet: emit a synthetic AI header row.
@@ -1229,6 +1252,12 @@ impl App {
         self.input_cursor = 0;
         self.scroll_offset = 0;
         self.attachment_picker_index = 0;
+        // Trim old messages from the front so the display list stays bounded.
+        if self.messages.len() >= MAX_DISPLAY_MESSAGES {
+            let drop_count = self.messages.len() - MAX_DISPLAY_MESSAGES + 1;
+            self.messages.drain(..drop_count);
+            self.display_lines_dirty = true;
+        }
         self.messages.push(Message::user_text(text, attachments));
         self.is_streaming = true;
         self.display_lines_dirty = true;
@@ -1261,7 +1290,10 @@ impl App {
 
     fn build_api_messages(&self) -> Vec<ApiMessage> {
         let mut out = Vec::new();
-        out.push(ApiMessage::system(build_system_prompt(&self.context)));
+        out.push(ApiMessage::system(build_system_prompt()));
+        // Dynamic fields (date, cwd, locale) go into a separate user message so
+        // the static system prompt can hit Anthropic's prompt-cache discount.
+        out.push(build_environment_message(&self.context));
         if let Some(m) = build_visible_snapshot_message(&self.context) {
             out.push(m);
         }
@@ -1363,7 +1395,14 @@ impl App {
                         self.stream_pending_err = Some(e);
                         break;
                     }
-                    Err(_) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // Background thread exited (e.g. after cancel). Treat as Done
+                        // so is_streaming is cleared even when no explicit Done was sent.
+                        self.token_rx = None;
+                        self.stream_pending_done = true;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
                 }
             }
         }
@@ -1439,6 +1478,14 @@ impl App {
                 std::thread::spawn(move || {
                     maybe_extract_memories(&client, &msgs);
                 });
+            }
+            // Consume any queued submit (only on success; on error keep the
+            // staged input so the user can review the failure before resending).
+            if self.stream_pending_err.is_none() && self.queued_submit {
+                self.queued_submit = false;
+                if !self.input.trim().is_empty() {
+                    self.submit();
+                }
             }
             changed = true;
         }
@@ -1629,11 +1676,11 @@ pub(crate) struct ToolRef {
 
 /// Format the tool-call suffix appended to an AI header row.
 /// Returns "  ✓ fs_list /path  ⚙ shell" (leading spaces, no trailing newline).
-fn format_tool_suffix(tools: &[ToolRef]) -> String {
+fn format_tool_suffix(tools: &[ToolRef], spinner: &str) -> String {
     let mut s = String::new();
     for t in tools {
         let icon = if !t.complete {
-            "⚙"
+            spinner // animated while running; static ✓/✗ after completion
         } else if t.failed {
             "✗"
         } else {
@@ -1701,6 +1748,10 @@ pub(crate) enum DisplayLine {
         role: Role,
         block: BlockStyle,
     },
+    /// Standalone "AI is thinking" indicator placed where the assistant's
+    /// message will appear. The renderer substitutes the current spinner
+    /// frame at draw time so the dot pulses without rebuilding the cache.
+    LoadingDot,
     Blank,
 }
 
@@ -1736,7 +1787,7 @@ pub(crate) enum MdBlock {
 /// honoring the enclosing block style.
 fn inline_cell(style: InlineStyle, block: BlockStyle, pal: &ChatPalette) -> CellAttributes {
     // Heading lines use the accent (AI header) color as their base, regardless
-    // of inline style — inline emphasis inside a heading still reads naturally.
+    // of inline style: inline emphasis inside a heading still reads naturally.
     let base = match block {
         BlockStyle::Heading(_) => pal.ai_header_cell(),
         BlockStyle::Quote => pal.input_cell(), // dim fg for block-quoted text
@@ -1764,7 +1815,12 @@ fn inline_cell(style: InlineStyle, block: BlockStyle, pal: &ChatPalette) -> Cell
 /// border glyphs). Each run is `(attr, text)`. Includes the left indent and
 /// any block-level decoration prefixes (quote bar, list bullet is already
 /// baked into the first span by `emit_assistant_markdown`).
-fn build_line_runs(line: &DisplayLine, pal: &ChatPalette) -> Vec<(CellAttributes, String)> {
+fn build_line_runs(
+    line: &DisplayLine,
+    pal: &ChatPalette,
+    spinner_char: &str,
+    content_width: usize,
+) -> Vec<(CellAttributes, String)> {
     let mut runs: Vec<(CellAttributes, String)> = Vec::new();
     match line {
         DisplayLine::Header {
@@ -1779,7 +1835,17 @@ fn build_line_runs(line: &DisplayLine, pal: &ChatPalette) -> Vec<(CellAttributes
             runs.push((pal.ai_header_cell(), "  AI".to_string()));
             if !tools.is_empty() {
                 // Render tool status in a dimmer tone so the "AI" header still pops.
-                runs.push((pal.input_cell(), format_tool_suffix(tools)));
+                // If the full tool list overflows one line, show only the latest tool
+                // so the user always sees the current operation without truncation.
+                let suffix = format_tool_suffix(tools, spinner_char);
+                let avail = content_width.saturating_sub(4); // 4 = "  AI"
+                let suffix = if unicode_column_width(&suffix, None) > avail {
+                    // Safe: guarded by `!tools.is_empty()` above.
+                    format_tool_suffix(std::slice::from_ref(tools.last().unwrap()), spinner_char)
+                } else {
+                    suffix
+                };
+                runs.push((pal.input_cell(), suffix));
             }
         }
         DisplayLine::AttachmentSummary { labels } => {
@@ -1820,6 +1886,9 @@ fn build_line_runs(line: &DisplayLine, pal: &ChatPalette) -> Vec<(CellAttributes
                 let attr = inline_cell(seg.style, *block, pal);
                 runs.push((attr, seg.text.clone()));
             }
+        }
+        DisplayLine::LoadingDot => {
+            runs.push((pal.ai_header_cell(), format!("  {}", spinner_char)));
         }
         DisplayLine::Blank => {}
     }
@@ -1981,15 +2050,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         };
         format!("{}{}", app.current_model(), suffix)
     };
-    let title = format!(
-        " Kaku AI{} {} · ⇧⇥ switch · ESC exit ",
-        if app.is_streaming || matches!(app.model_fetch, ModelFetch::Loading) {
-            format!(" {}", app.spinner_char())
-        } else {
-            " •".to_string()
-        },
-        model_display
-    );
+    let title = format!(" Kaku AI • {} · ⇧⇥ switch · ESC exit ", model_display);
     let title_width = unicode_column_width(&title, None);
     let border_fill = inner_w.saturating_sub(title_width);
     let top_line = format!("╭─{}{}─╮", title, "─".repeat(border_fill.saturating_sub(2)));
@@ -2022,7 +2083,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         changes.push(Change::AllAttributes(pal.border_dim_cell()));
         changes.push(Change::Text("│".to_string()));
 
-        let runs = build_line_runs(line, pal);
+        let runs = build_line_runs(line, pal, app.spinner_char(), inner_w);
         let line_idx = visible_start + i;
 
         // Determine the selection column range for this line (content columns, 0-based).
@@ -2072,7 +2133,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         changes.push(Change::Text("│".to_string()));
     }
 
-    // 4. Separator row — also used for inline slash-command / attachment suggestions.
+    // 4. Separator row, also used for inline slash-command / attachment suggestions.
     let sep_row = rows.saturating_sub(3);
     let slash_options = app.slash_picker_options();
     let attach_options = app.attachment_picker_options();
@@ -2125,7 +2186,7 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         )));
     }
 
-    // 5. Input row — or approval prompt when agent is waiting for confirmation.
+    // 5. Input row, or approval prompt when agent is waiting for confirmation.
     let input_row = rows.saturating_sub(2);
     changes.push(Change::CursorPosition {
         x: Position::Absolute(0),
@@ -2136,8 +2197,15 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
 
     // Compute cursor state now; apply AFTER bottom border so it's the final position.
     let cursor_state: Option<(usize, usize)> = if let Some((summary, _)) = &app.pending_approval {
-        let approval_text = format!("  Allow: {}  [y/Enter=yes  n/Esc=no]", summary);
-        changes.push(Change::AllAttributes(pal.user_text_cell()));
+        // Approval banner uses the AI accent color + a live spinner so it visually
+        // separates from the regular `> ` input row and pulls the user's eye.
+        // Keys are placed first so they remain visible when summary is truncated.
+        let approval_text = format!(
+            "  {} Enter allow · ESC deny   {}",
+            app.spinner_char(),
+            summary
+        );
+        changes.push(Change::AllAttributes(pal.ai_header_cell()));
         changes.push(Change::Text(truncate(
             &pad_to_visual_width(&approval_text, inner_w),
             inner_w,
@@ -2146,7 +2214,16 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         changes.push(Change::Text("│".to_string()));
         None // hidden
     } else {
-        let prompt = "  > ";
+        // Show a pulsing spinner instead of `>` while streaming so the user
+        // sees the response is still in progress. If a follow-up message is
+        // queued (Enter pressed during streaming), add a ↵ glyph to signal it.
+        let prompt = if app.queued_submit {
+            format!("  {} ↵ ", app.spinner_char())
+        } else if app.is_streaming {
+            format!("  {} ", app.spinner_char())
+        } else {
+            "  > ".to_string()
+        };
         let input_display = format!("{}{}", prompt, app.input);
         let input_padded = format!("{:<width$}", input_display, width = inner_w);
         changes.push(Change::AllAttributes(pal.input_cell()));
@@ -2154,16 +2231,13 @@ fn render_chat(term: &mut TermWizTerminal, app: &App) -> termwiz::Result<()> {
         changes.push(Change::AllAttributes(pal.border_dim_cell()));
         changes.push(Change::Text("│".to_string()));
 
-        if app.is_streaming {
-            None // hide cursor while AI is responding
-        } else {
-            let cursor_byte = char_to_byte_pos(&app.input, app.input_cursor);
-            let cursor_col = (1
-                + unicode_column_width(prompt, None)
-                + unicode_column_width(&app.input[..cursor_byte], None))
-            .min(cols.saturating_sub(2));
-            Some((cursor_col, input_row))
-        }
+        // Always show the cursor so users can see where staged input will land.
+        let cursor_byte = char_to_byte_pos(&app.input, app.input_cursor);
+        let cursor_col = (1
+            + unicode_column_width(&prompt, None)
+            + unicode_column_width(&app.input[..cursor_byte], None))
+        .min(cols.saturating_sub(2));
+        Some((cursor_col, input_row))
     };
 
     // 6. Bottom border.
@@ -2333,19 +2407,11 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
         app.selecting = false;
     }
 
-    // Handle approval prompt: y/Enter = approve, n/Esc = reject, other keys ignored.
+    // Handle approval prompt: Enter = approve, Esc = reject, other keys ignored.
+    // Esc is captured here so it rejects the tool call rather than exiting the chat.
     if let Some((summary, reply_tx)) = app.pending_approval.take() {
-        let is_approve = matches!(
-            (&key.key, key.modifiers),
-            (
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter,
-                Modifiers::NONE
-            )
-        );
-        let is_reject = matches!(
-            (&key.key, key.modifiers),
-            (KeyCode::Char('n') | KeyCode::Char('N'), Modifiers::NONE) | (KeyCode::Escape, _)
-        );
+        let is_approve = matches!((&key.key, key.modifiers), (KeyCode::Enter, Modifiers::NONE));
+        let is_reject = matches!((&key.key, key.modifiers), (KeyCode::Escape, _));
         if is_approve {
             let _ = reply_tx.send(true);
             return Action::Continue;
@@ -2374,10 +2440,28 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
         .is_some_and(|(_, _, token)| picker_options.iter().any(|option| option.label == token));
 
     match (&key.key, key.modifiers) {
-        // Exit: signal any running stream to stop.
+        // Escape / Ctrl+C: cancel a running stream; exit the overlay when idle.
         (KeyCode::Escape, _) | (KeyCode::Char('C'), Modifiers::CTRL) => {
             app.cancel_flag.store(true, Ordering::Relaxed);
-            Action::Quit
+            if app.is_streaming || !app.grapheme_queue.is_empty() {
+                // Interrupt the ongoing response without closing the overlay.
+                // Drain the typewriter queue so output stops immediately.
+                app.grapheme_queue.clear();
+                // Discard any queued follow-up so it doesn't fire after cancel.
+                app.queued_submit = false;
+                // Mark any incomplete assistant message as done.
+                if let Some(last) = app
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|m| !m.is_tool() && !m.complete)
+                {
+                    last.complete = true;
+                }
+                Action::Continue
+            } else {
+                Action::Quit
+            }
         }
 
         // Submit: accept slash selection then execute it immediately.
@@ -2396,7 +2480,35 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
             app.submit();
             Action::Continue
         }
+        // Streaming: queue a non-empty input for auto-submit when stream ends.
+        (KeyCode::Enter, Modifiers::NONE) => {
+            if !app.input.trim().is_empty() {
+                app.queued_submit = true;
+            }
+            Action::Continue
+        }
         (KeyCode::Enter, _) => Action::Continue,
+
+        // Cmd+Backspace: clear the entire input line (macOS-native shortcut).
+        (KeyCode::Backspace, Modifiers::SUPER) => {
+            app.input.clear();
+            app.input_cursor = 0;
+            app.attachment_picker_index = 0;
+            Action::Continue
+        }
+
+        // Option+Backspace: delete the previous word (macOS-native shortcut).
+        (KeyCode::Backspace, Modifiers::ALT) => {
+            if app.input_cursor > 0 {
+                let target = prev_word_pos(&app.input, app.input_cursor);
+                let from_byte = char_to_byte_pos(&app.input, target);
+                let to_byte = char_to_byte_pos(&app.input, app.input_cursor);
+                app.input.drain(from_byte..to_byte);
+                app.input_cursor = target;
+                app.attachment_picker_index = 0;
+            }
+            Action::Continue
+        }
 
         // Backspace
         (KeyCode::Backspace, _) => {
@@ -2433,7 +2545,10 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
         // Copy selection to clipboard (Cmd+C on macOS)
         (KeyCode::Char('c'), Modifiers::SUPER) | (KeyCode::Char('C'), Modifiers::SUPER) => {
             if let Some(text) = extract_selection_text(app) {
-                copy_to_clipboard(&text);
+                if !text.is_empty() {
+                    copy_to_clipboard(&text);
+                    app.model_status_flash = Some(("copied".to_string(), Instant::now()));
+                }
             }
             Action::Continue
         }
@@ -2463,6 +2578,30 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
         }
         (KeyCode::DownArrow, _) | (KeyCode::PageDown, _) => {
             app.scroll_offset = app.scroll_offset.saturating_sub(3);
+            Action::Continue
+        }
+
+        // Cmd+Left / Cmd+Right: jump to start / end of input.
+        (KeyCode::LeftArrow, Modifiers::SUPER) => {
+            app.input_cursor = 0;
+            app.attachment_picker_index = 0;
+            Action::Continue
+        }
+        (KeyCode::RightArrow, Modifiers::SUPER) => {
+            app.input_cursor = app.input.chars().count();
+            app.attachment_picker_index = 0;
+            Action::Continue
+        }
+
+        // Option+Left / Option+Right: jump by word.
+        (KeyCode::LeftArrow, Modifiers::ALT) => {
+            app.input_cursor = prev_word_pos(&app.input, app.input_cursor);
+            app.attachment_picker_index = 0;
+            Action::Continue
+        }
+        (KeyCode::RightArrow, Modifiers::ALT) => {
+            app.input_cursor = next_word_pos(&app.input, app.input_cursor);
+            app.attachment_picker_index = 0;
             Action::Continue
         }
 
@@ -2511,8 +2650,9 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
                         app.model_status_flash = Some((msg, Instant::now()));
                     }
                     ModelFetch::Loaded => {
-                        if app.available_models.len() > 1 {
-                            app.model_index = (app.model_index + 1) % app.available_models.len();
+                        let n = app.available_models.len();
+                        if n > 1 && app.model_index + 1 < n {
+                            app.model_index += 1;
                             // Persist the selection so it survives overlay close/reopen.
                             let model = app.current_model();
                             if let Err(e) = crate::ai_state::save_last_model(&model) {
@@ -2526,15 +2666,14 @@ fn handle_key(key: &KeyEvent, app: &mut App) -> Action {
         }
 
         // Regular character input (skip control characters like \t handled above).
+        // Allowed during streaming so the user can stage the next message.
         (KeyCode::Char(c), Modifiers::NONE) | (KeyCode::Char(c), Modifiers::SHIFT)
             if !c.is_control() =>
         {
-            if !app.is_streaming {
-                let byte_pos = char_to_byte_pos(&app.input, app.input_cursor);
-                app.input.insert(byte_pos, *c);
-                app.input_cursor += 1;
-                app.attachment_picker_index = 0;
-            }
+            let byte_pos = char_to_byte_pos(&app.input, app.input_cursor);
+            app.input.insert(byte_pos, *c);
+            app.input_cursor += 1;
+            app.attachment_picker_index = 0;
             Action::Continue
         }
 
@@ -2651,8 +2790,20 @@ fn handle_mouse(event: &MouseEvent, app: &mut App) {
             }
         }
         (true, false) => {
-            // Release edge: finalize the selection; keep it for Cmd+C.
+            // Release edge: finalize the selection and auto-copy to clipboard.
+            // Require at least 5 chars OR multi-word to avoid clobbering clipboard
+            // on accidental single-character selections.
             app.selecting = false;
+            if app.selection.is_some() {
+                if let Some(text) = extract_selection_text(app) {
+                    let chars = text.chars().count();
+                    let multi_word = text.split_whitespace().count() >= 2;
+                    if chars >= 5 || multi_word {
+                        copy_to_clipboard(&text);
+                        app.model_status_flash = Some(("copied".to_string(), Instant::now()));
+                    }
+                }
+            }
         }
         (false, false) => {}
     }
@@ -2693,13 +2844,6 @@ pub fn ai_chat_overlay(
     let mut app = App::new(context, chat_model, chat_model_choices, cols, rows, client);
     let mut needs_redraw = true;
 
-    // Welcome message: shown in UI only, not sent to the API.
-    app.messages.push(Message::text(
-        Role::Assistant,
-        "Hello! I'm your Kaku AI assistant. How can I help you today?",
-        true,
-        true,
-    ));
     app.display_lines_dirty = true;
 
     loop {
@@ -2754,17 +2898,16 @@ pub fn ai_chat_overlay(
                 // IME composed text (e.g. Chinese, Japanese) arrives here via
                 // ForwardWriter in TermWizTerminalPane, which converts bytes
                 // written to pane.writer() into InputEvent::Paste events.
-                if !app.is_streaming {
-                    for c in text.chars() {
-                        if !c.is_control() {
-                            let byte_pos = char_to_byte_pos(&app.input, app.input_cursor);
-                            app.input.insert(byte_pos, c);
-                            app.input_cursor += 1;
-                        }
+                // Allowed during streaming so the user can stage the next message.
+                for c in text.chars() {
+                    if !c.is_control() {
+                        let byte_pos = char_to_byte_pos(&app.input, app.input_cursor);
+                        app.input.insert(byte_pos, c);
+                        app.input_cursor += 1;
                     }
-                    app.display_lines_dirty = true;
-                    needs_redraw = true;
                 }
+                app.display_lines_dirty = true;
+                needs_redraw = true;
             }
             Some(InputEvent::Mouse(mouse)) => {
                 handle_mouse(&mouse, &mut app);
@@ -2782,6 +2925,10 @@ pub fn ai_chat_overlay(
                 let spinner_changed = (app.is_streaming
                     || matches!(app.model_fetch, ModelFetch::Loading))
                     && app.try_advance_spinner();
+                if spinner_changed && app.has_pending_tool() {
+                    // Tool suffix in the header uses the spinner char; must rebuild.
+                    app.display_lines_dirty = true;
+                }
                 if app.is_streaming
                     || !app.grapheme_queue.is_empty()
                     || app.stream_pending_done
@@ -2814,6 +2961,34 @@ fn char_to_byte_pos(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(b, _)| b)
         .unwrap_or(s.len())
+}
+
+/// Char-index of the previous word boundary (macOS Option+Left semantics):
+/// skip trailing whitespace, then skip the run of non-whitespace characters.
+fn prev_word_pos(input: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = cursor.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// Char-index of the next word boundary (macOS Option+Right semantics):
+/// skip leading whitespace, then skip the run of non-whitespace characters.
+fn next_word_pos(input: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = cursor.min(chars.len());
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < chars.len() && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
 }
 
 /// Truncate `s` to at most `max_cols` visual terminal columns.
@@ -2891,7 +3066,7 @@ fn extract_selection_text(app: &App) -> Option<String> {
                 tools,
             } => {
                 let mut s = "  AI".to_string();
-                s.push_str(&format_tool_suffix(tools));
+                s.push_str(&format_tool_suffix(tools, "⚙"));
                 (s, "  ")
             }
             DisplayLine::AttachmentSummary { labels } => {
@@ -2909,6 +3084,7 @@ fn extract_selection_text(app: &App) -> Option<String> {
                 };
                 (format!("{}{}", indent, segments_to_plain(segments)), indent)
             }
+            DisplayLine::LoadingDot => (String::new(), ""),
             DisplayLine::Blank => (String::new(), ""),
         };
 
@@ -2981,6 +3157,8 @@ mod markdown_tests {
             tab_snapshot: "cargo test\nerror: boom".to_string(),
             selected_text: "selected snippet".to_string(),
             colors: test_palette(),
+            last_exit_code: None,
+            last_command_output: None,
         }
     }
 
@@ -3161,9 +3339,15 @@ mod markdown_tests {
         let text = "这是一段很长的中文内容不包含任何空格直接连续输出测试换行功能是否正确";
         let segs = vec![plain(text)];
         let wrapped = wrap_segments(&segs, 10);
-        assert!(wrapped.len() > 1, "expected multiple wrapped lines for wide CJK run");
+        assert!(
+            wrapped.len() > 1,
+            "expected multiple wrapped lines for wide CJK run"
+        );
         for line in &wrapped {
-            let w: usize = line.iter().map(|s| unicode_column_width(&s.text, None)).sum();
+            let w: usize = line
+                .iter()
+                .map(|s| unicode_column_width(&s.text, None))
+                .sum();
             assert!(
                 w <= 10,
                 "line exceeds width=10: w={w} text={:?}",
@@ -3178,9 +3362,15 @@ mod markdown_tests {
         let url = "https://example.com/very/long/path/to/some/resource?query=param&other=value";
         let segs = vec![plain(url)];
         let wrapped = wrap_segments(&segs, 20);
-        assert!(wrapped.len() > 1, "expected multiple wrapped lines for long URL");
+        assert!(
+            wrapped.len() > 1,
+            "expected multiple wrapped lines for long URL"
+        );
         for line in &wrapped {
-            let w: usize = line.iter().map(|s| unicode_column_width(&s.text, None)).sum();
+            let w: usize = line
+                .iter()
+                .map(|s| unicode_column_width(&s.text, None))
+                .sum();
             assert!(
                 w <= 20,
                 "line exceeds width=20: w={w} text={:?}",
@@ -3247,6 +3437,8 @@ mod markdown_tests {
             tab_snapshot: String::new(),
             selected_text: String::new(),
             colors: test_palette(),
+            last_exit_code: None,
+            last_command_output: None,
         };
 
         let attachment = build_cwd_attachment(&context).expect("cwd attachment");
@@ -3316,7 +3508,7 @@ mod markdown_tests {
             "basename src/main.rs",
             "dirname src/main.rs",
             "find . -name '*.rs'",
-            // git commands — read-only and previously restricted ones are all now allowed
+            // git commands: read-only and previously restricted ones are all now allowed
             "git status",
             "git diff HEAD~1",
             "git diff --output-indicator-new=+",
@@ -3332,6 +3524,26 @@ mod markdown_tests {
             "git tag -l 'V0.*'",
             "git stash list",
             "git rev-parse --show-toplevel",
+            // gh (GitHub CLI) read-only operations
+            "gh issue list",
+            "gh issue list --state open",
+            "gh issue view 123",
+            "gh pr list",
+            "gh pr view 456",
+            "gh pr diff 456",
+            "gh pr checks 456",
+            "gh repo view tw93/Kaku",
+            "gh release list",
+            "gh release view v0.10.0",
+            "gh workflow list",
+            "gh run list",
+            "gh search issues kaku",
+            "gh search prs --repo tw93/Kaku",
+            "gh auth status",
+            "gh status",
+            "gh api repos/tw93/Kaku",
+            "gh api -X GET repos/tw93/Kaku",
+            "gh api --method=GET repos/tw93/Kaku",
             // other common dev commands (read-only)
             "cargo build",
             "cargo test",
@@ -3408,6 +3620,21 @@ mod markdown_tests {
             "git add .",
             "git commit -m 'fix: update config'",
             "git push origin main",
+            // gh (GitHub CLI) mutating operations
+            "gh issue create --title hi --body bye",
+            "gh issue close 123",
+            "gh issue comment 123 --body hi",
+            "gh pr create --title hi",
+            "gh pr merge 456",
+            "gh pr close 456",
+            "gh pr comment 456 --body hi",
+            "gh repo create new-repo",
+            "gh release create v1.0.0",
+            "gh auth login",
+            "gh auth logout",
+            "gh api -X POST repos/tw93/Kaku/issues",
+            "gh api --method POST repos/tw93/Kaku/issues",
+            "gh api repos/tw93/Kaku/issues -F title=hi",
             // filesystem write operations
             "touch file.txt",
             "mkdir -p src/new",
@@ -3442,6 +3669,8 @@ mod markdown_tests {
             tab_snapshot: String::new(),
             selected_text: String::new(),
             colors: test_palette(),
+            last_exit_code: None,
+            last_command_output: None,
         })
         .expect("snapshot message");
 

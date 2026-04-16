@@ -189,6 +189,43 @@ pub(crate) fn tokenize_inline(text: &str) -> Vec<InlineSpan> {
 
 /// Append `span` to `out`, merging with the last span if styles match. Keeps
 /// the run count low, which matters for render throughput.
+/// CJK kinsoku shori: characters that must NOT appear at the start of a line.
+/// Covers fullwidth punctuation (Chinese/Japanese) and common closing brackets.
+fn is_cjk_no_line_start(g: &str) -> bool {
+    let c = match g.chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+    matches!(
+        c,
+        '：' | '，'
+            | '。'
+            | '、'
+            | '；'
+            | '？'
+            | '！'
+            | '）'
+            | '】'
+            | '》'
+            | '」'
+            | '』'
+            | '〉'
+            | '〕'
+            | '…'
+            | '‥'
+            | '～'
+            | ')'
+            | ']'
+            | '}'
+            | '.'
+            | ','
+            | ':'
+            | ';'
+            | '?'
+            | '!'
+    )
+}
+
 fn merge_push(out: &mut Vec<InlineSpan>, span: InlineSpan) {
     if span.text.is_empty() {
         return;
@@ -333,13 +370,40 @@ pub(crate) fn wrap_segments(segments: &[InlineSpan], width: usize) -> Vec<Vec<In
         }
         // Hard-break oversized non-whitespace tokens (long URLs, CJK runs) by
         // slicing at grapheme boundaries so they never exceed `width`.
+        // CJK kinsoku: never break before "no-line-start" punctuation (：，。etc.)
+        // even if it overshoots `width` by one character.
         if !is_ws && w > width {
             let mut chunk = String::new();
             let mut chunk_w = 0usize;
-            for g in text.graphemes(true) {
+            let graphemes: Vec<&str> = text.graphemes(true).collect();
+            for (gi, g) in graphemes.iter().enumerate() {
                 let gw = unicode_column_width(g, None);
                 if chunk_w + gw > width && !chunk.is_empty() {
-                    // Flush the current line before starting a new chunk.
+                    // Kinsoku: if this grapheme is a no-line-start char, absorb it
+                    // into the current chunk rather than letting it start a new line.
+                    if is_cjk_no_line_start(g) {
+                        chunk.push_str(g);
+                        // chunk_w is reset to 0 below; the increment is skipped intentionally.
+                        // Now flush the chunk that includes the punctuation.
+                        if !current.is_empty() {
+                            lines.push(std::mem::take(&mut current));
+                            current_w = 0;
+                        }
+                        lines.push(vec![InlineSpan {
+                            text: std::mem::take(&mut chunk),
+                            style,
+                        }]);
+                        chunk_w = 0;
+                        continue;
+                    }
+                    // Also check: if the NEXT grapheme is a no-line-start char,
+                    // include the current grapheme AND the next one on this line.
+                    if gi + 1 < graphemes.len() && is_cjk_no_line_start(graphemes[gi + 1]) {
+                        chunk.push_str(g);
+                        chunk_w += gw;
+                        continue; // let the next iteration absorb it via the branch above.
+                    }
+                    // Normal break: flush the current chunk.
                     if !current.is_empty() {
                         lines.push(std::mem::take(&mut current));
                         current_w = 0;

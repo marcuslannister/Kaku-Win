@@ -1717,7 +1717,7 @@ impl TermWindow {
         window.show();
         crate::startup_trace::mark("  window.show() done");
 
-        // These run after show — they don't affect window visibility.
+        // These run after show; they don't affect window visibility.
         Self::apply_icon(&window)?;
 
         let config_subscription = config::subscribe_to_config_reload({
@@ -4213,6 +4213,34 @@ impl TermWindow {
                         .map(|u| u.path().to_string())
                         .unwrap_or_default();
                     let selected_text = self.selection_text(pane);
+
+                    // Extract last command status and output if available
+                    let last_exit_code = pane.get_last_command_status();
+
+                    let last_command_output = if let (Some(code), Some(output_start)) =
+                        (last_exit_code, pane.get_last_command_output_start())
+                    {
+                        if code != 0 {
+                            // Only extract output when command failed
+                            let output_end = bottom.min(output_start + 51);
+                            if output_end > output_start {
+                                let (_, output_lines) = pane.get_lines(output_start..output_end);
+                                Some(
+                                    output_lines
+                                        .iter()
+                                        .map(|l| l.as_str().to_string())
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     let pal = self.palette().clone();
                     // Helper: wrap a resolved SrgbaTuple as a ChatPalette color field.
                     fn srgb(t: SrgbaTuple) -> SrgbaTuple {
@@ -4239,6 +4267,8 @@ impl TermWindow {
                         tab_snapshot,
                         selected_text,
                         colors: chat_colors,
+                        last_exit_code,
+                        last_command_output,
                     };
                     let pane_id = pane.pane_id();
                     let (overlay, future) =
@@ -5064,7 +5094,7 @@ impl TermWindow {
         }
         // Build a pane_id → TerminalSize map using the tab layout tree.
         // iter_panes() returns visual/layout dimensions, which are kept up-to-date
-        // by resize_visual() during live dragging — unlike pane.get_dimensions(),
+        // by resize_visual() during live dragging, unlike pane.get_dimensions(),
         // which only reflects the last physical (non-live) resize.
         let cell_h = self
             .terminal_size
