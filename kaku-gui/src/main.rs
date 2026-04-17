@@ -90,6 +90,8 @@ use wezterm_toast_notification::*;
 
 mod ai_client;
 mod ai_conversations;
+#[cfg(feature = "remote")]
+mod ai_remote;
 mod ai_state;
 mod ai_tools;
 mod colorease;
@@ -365,7 +367,10 @@ async fn async_run_terminal_gui(
     startup_trace::mark("  spawn_mux_server done");
 
     #[cfg(feature = "remote")]
-    kaku_remote::start();
+    {
+        ai_remote::register_if_configured();
+        kaku_remote::start();
+    }
 
     let default_domain_is_local = Mux::get().default_domain().domain_name() == "local";
     if default_domain_is_local {

@@ -14,9 +14,10 @@ use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 // ── Token ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,135 @@ struct AppState {
 
 /// Maximum bytes accepted in a single client input message.
 const MAX_INPUT_LEN: usize = 65_536;
+
+/// Maximum concurrent AI chats per WebSocket session. Prevents an authenticated
+/// client from spawning an unbounded number of handler threads.
+const MAX_INFLIGHT_AI: usize = 4;
+
+// ── AI handler registration ───────────────────────────────────────────────────
+
+/// Request delivered to a registered AI handler when a mobile client sends
+/// `ai_chat`. The handler streams responses back through `tx` and should abort
+/// when `cancel` flips to `true`. `in_flight` is an session-shared counter;
+/// the handler must decrement it exactly once when it finishes.
+#[derive(Debug)]
+pub struct AiRequest {
+    pub conversation_id: String,
+    pub content: String,
+    pub attach_pane: Option<usize>,
+    pub tx: mpsc::UnboundedSender<AiEvent>,
+    pub cancel: Arc<AtomicBool>,
+    pub in_flight: Arc<AtomicUsize>,
+}
+
+/// Events emitted by an AI handler back to the mobile client. Maps 1:1 to the
+/// tagged `ServerMsg` AI variants.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiEvent {
+    AiToken {
+        conversation_id: String,
+        delta: String,
+    },
+    AiToolCall {
+        conversation_id: String,
+        id: String,
+        tool: String,
+        summary: String,
+    },
+    AiToolResult {
+        conversation_id: String,
+        id: String,
+        ok: bool,
+        summary: String,
+    },
+    AiDone {
+        conversation_id: String,
+    },
+    AiError {
+        conversation_id: String,
+        message: String,
+    },
+}
+
+/// Callable AI handler. Implementations (provided by kaku-gui) should spawn
+/// their own task and stream events through `req.tx`.
+pub type AiHandler = Arc<dyn Fn(AiRequest) + Send + Sync + 'static>;
+
+static AI_HANDLER: OnceLock<AiHandler> = OnceLock::new();
+
+/// Register a global AI handler. Must be called before `start()`. Subsequent
+/// registrations are ignored (first-writer-wins).
+pub fn set_ai_handler(handler: AiHandler) {
+    let _ = AI_HANDLER.set(handler);
+}
+
+fn ai_enabled() -> bool {
+    AI_HANDLER.get().is_some()
+}
+
+fn dispatch_ai(req: AiRequest) {
+    if let Some(handler) = AI_HANDLER.get() {
+        handler(req);
+    } else {
+        // No handler: release the in-flight slot and return an error.
+        req.in_flight.fetch_sub(1, Ordering::AcqRel);
+        let _ = req.tx.send(AiEvent::AiError {
+            conversation_id: req.conversation_id,
+            message: "ai_unavailable".to_string(),
+        });
+    }
+}
+
+/// Session-shared state used by both the local WebSocket handler and the
+/// outbound relay tunnel to route AI messages without duplicating logic.
+type CancelMap = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// Start an AI chat for this session. Enforces MAX_INFLIGHT_AI per session.
+/// Registers the cancel flag in `cancel_handles` so a later AiCancel can abort.
+fn dispatch_ai_chat(
+    conversation_id: String,
+    content: String,
+    attach_pane: Option<usize>,
+    ai_tx: &mpsc::UnboundedSender<AiEvent>,
+    cancel_handles: &CancelMap,
+    in_flight: &Arc<AtomicUsize>,
+) {
+    let current = in_flight.fetch_add(1, Ordering::AcqRel);
+    if current >= MAX_INFLIGHT_AI {
+        in_flight.fetch_sub(1, Ordering::AcqRel);
+        let _ = ai_tx.send(AiEvent::AiError {
+            conversation_id,
+            message: "too_many_in_flight".to_string(),
+        });
+        return;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    cancel_handles
+        .lock()
+        .insert(conversation_id.clone(), cancel.clone());
+    dispatch_ai(AiRequest {
+        conversation_id,
+        content,
+        attach_pane,
+        tx: ai_tx.clone(),
+        cancel,
+        in_flight: in_flight.clone(),
+    });
+}
+
+/// Flip the cancel flag for a conversation and remove the handle.
+fn cancel_ai_conversation(conversation_id: &str, cancel_handles: &CancelMap) {
+    if let Some(flag) = cancel_handles.lock().remove(conversation_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Remove the cancel handle for a conversation that has ended on its own.
+/// Idempotent: no-op when the entry has already been removed by AiCancel.
+fn finish_ai_conversation(conversation_id: &str, cancel_handles: &CancelMap) {
+    cancel_handles.lock().remove(conversation_id);
+}
 
 // ── Wire protocol ─────────────────────────────────────────────────────────────
 
@@ -80,6 +210,9 @@ struct ConfigInfo {
     brights: Vec<String>,
     font_family: String,
     font_size: f64,
+    /// Capability flags for the iOS client. Currently emits "ai_chat" when an
+    /// AI handler is registered at boot.
+    features: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,14 +221,106 @@ struct WsQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMsg {
-    #[serde(rename = "input")]
     Input {
         #[serde(default)]
         pane_id: Option<usize>,
         text: String,
     },
+    /// Reserved for future client-driven scroll; server currently ignores.
+    #[allow(dead_code)]
+    Scroll {
+        #[serde(default)]
+        pane_id: Option<usize>,
+        delta: i32,
+    },
+    AiChat {
+        conversation_id: String,
+        content: String,
+        #[serde(default)]
+        attach_pane: Option<usize>,
+    },
+    AiCancel {
+        conversation_id: String,
+    },
+}
+
+/// Server-to-client WebSocket message. Screen updates are wrapped in the
+/// `screen` variant so v2 clients can dispatch on `type`. iOS v1 clients that
+/// predate this change ignore unknown JSON keys, so the added `type` field is
+/// backwards-compatible.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ServerMsg {
+    Screen(ScreenUpdate),
+    AiToken {
+        conversation_id: String,
+        delta: String,
+    },
+    AiToolCall {
+        conversation_id: String,
+        id: String,
+        tool: String,
+        summary: String,
+    },
+    AiToolResult {
+        conversation_id: String,
+        id: String,
+        ok: bool,
+        summary: String,
+    },
+    AiDone {
+        conversation_id: String,
+    },
+    AiError {
+        conversation_id: String,
+        message: String,
+    },
+}
+
+impl From<AiEvent> for ServerMsg {
+    fn from(evt: AiEvent) -> Self {
+        match evt {
+            AiEvent::AiToken {
+                conversation_id,
+                delta,
+            } => ServerMsg::AiToken {
+                conversation_id,
+                delta,
+            },
+            AiEvent::AiToolCall {
+                conversation_id,
+                id,
+                tool,
+                summary,
+            } => ServerMsg::AiToolCall {
+                conversation_id,
+                id,
+                tool,
+                summary,
+            },
+            AiEvent::AiToolResult {
+                conversation_id,
+                id,
+                ok,
+                summary,
+            } => ServerMsg::AiToolResult {
+                conversation_id,
+                id,
+                ok,
+                summary,
+            },
+            AiEvent::AiDone { conversation_id } => ServerMsg::AiDone { conversation_id },
+            AiEvent::AiError {
+                conversation_id,
+                message,
+            } => ServerMsg::AiError {
+                conversation_id,
+                message,
+            },
+        }
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -166,6 +391,11 @@ async fn route_config(Query(query): Query<WsQuery>, headers: axum::http::HeaderM
         .map(|f| f.family.clone())
         .unwrap_or_else(|| "JetBrains Mono".to_string());
 
+    let mut features: Vec<String> = Vec::new();
+    if ai_enabled() {
+        features.push("ai_chat".to_string());
+    }
+
     let info = ConfigInfo {
         background: opt_hex(palette.background.as_ref()),
         foreground: opt_hex(palette.foreground.as_ref()),
@@ -175,6 +405,7 @@ async fn route_config(Query(query): Query<WsQuery>, headers: axum::http::HeaderM
         brights: bright_colors,
         font_family,
         font_size: cfg.font_size,
+        features,
     };
 
     match serde_json::to_value(&info) {
@@ -295,7 +526,7 @@ async fn route_qr_inner() -> Html<String> {
 /// Best-effort: return the first non-loopback IPv4 address.
 fn lan_ip() -> Option<String> {
     use std::net::UdpSocket;
-    // Connect to a public address without sending data — just to discover
+    // Connect to a public address without sending data, just to discover
     // the local interface IP the OS would route through.
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:80").ok()?;
@@ -334,37 +565,59 @@ async fn handle_ws(
 ) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Send initial screen snapshot
+    // Initial snapshot
     if let Some(update) = capture_pane(pane_id) {
-        if let Ok(json) = serde_json::to_string(&update) {
-            if let Err(e) = sender.send(ws::Message::Text(json.into())).await {
-                log::debug!(
-                    "kaku-remote: failed to send initial snapshot for pane {}: {:?}",
-                    pane_id,
-                    e
-                );
+        let msg = ServerMsg::Screen(update);
+        if let Ok(json) = serde_json::to_string(&msg) {
+            if sender.send(ws::Message::Text(json.into())).await.is_err() {
+                return;
             }
         }
     }
 
-    // Forward screen updates → WebSocket
+    // Merge screen-update broadcast + AI-event mpsc into a single send loop.
+    let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<AiEvent>();
+    let cancel_handles: CancelMap = Arc::new(Mutex::new(HashMap::new()));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
+    let cancel_handles_send = cancel_handles.clone();
     let send_task = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(update) => {
-                    if let Ok(json) = serde_json::to_string(&update) {
+            tokio::select! {
+                biased;
+                ai = ai_rx.recv() => {
+                    let Some(event) = ai else { break };
+                    // Conversation ended on its own; drop the cancel handle.
+                    if let AiEvent::AiDone { conversation_id }
+                        | AiEvent::AiError { conversation_id, .. } = &event
+                    {
+                        finish_ai_conversation(conversation_id, &cancel_handles_send);
+                    }
+                    let msg: ServerMsg = event.into();
+                    if let Ok(json) = serde_json::to_string(&msg) {
                         if sender.send(ws::Message::Text(json.into())).await.is_err() {
                             break;
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                recv = rx.recv() => {
+                    match recv {
+                        Ok(update) => {
+                            let msg = ServerMsg::Screen(update);
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                if sender.send(ws::Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
             }
         }
     });
 
-    // Forward client input → pane
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
             ws::Message::Text(t) => t.to_string(),
@@ -372,24 +625,49 @@ async fn handle_ws(
             _ => continue,
         };
 
-        if let Ok(ClientMsg::Input { text: input, .. }) = serde_json::from_str(&text) {
-            if input.len() > MAX_INPUT_LEN {
-                log::warn!(
-                    "kaku-remote: input too large ({} bytes), dropping",
-                    input.len()
-                );
-                continue;
-            }
-            if let Some(mux) = Mux::try_get() {
-                if let Some(pane) = mux.get_pane(mux::pane::PaneId::from(pane_id)) {
-                    if let Err(e) = pane.writer().write_all(input.as_bytes()) {
-                        log::debug!(
-                            "kaku-remote: failed to write input to pane {}: {}",
-                            pane_id,
-                            e
-                        );
+        match serde_json::from_str::<ClientMsg>(&text) {
+            Ok(ClientMsg::Input { text: input, .. }) => {
+                if input.len() > MAX_INPUT_LEN {
+                    log::warn!(
+                        "kaku-remote: input too large ({} bytes), dropping",
+                        input.len()
+                    );
+                    continue;
+                }
+                if let Some(mux) = Mux::try_get() {
+                    if let Some(pane) = mux.get_pane(mux::pane::PaneId::from(pane_id)) {
+                        if let Err(e) = pane.writer().write_all(input.as_bytes()) {
+                            log::debug!(
+                                "kaku-remote: failed to write input to pane {}: {}",
+                                pane_id,
+                                e
+                            );
+                        }
                     }
                 }
+            }
+            Ok(ClientMsg::Scroll { .. }) => {
+                // Reserved for future server-side scroll routing.
+            }
+            Ok(ClientMsg::AiChat {
+                conversation_id,
+                content,
+                attach_pane,
+            }) => {
+                dispatch_ai_chat(
+                    conversation_id,
+                    content,
+                    attach_pane,
+                    &ai_tx,
+                    &cancel_handles,
+                    &in_flight,
+                );
+            }
+            Ok(ClientMsg::AiCancel { conversation_id }) => {
+                cancel_ai_conversation(&conversation_id, &cancel_handles);
+            }
+            Err(e) => {
+                log::debug!("kaku-remote: unknown ws message: {}", e);
             }
         }
     }
@@ -509,7 +787,7 @@ pub fn render_relay_qr_terminal(relay_server: &str, token: &str) -> String {
     format!("{}\n{}", rendered.trim_end(), url)
 }
 
-/// Start the outbound relay tunnel.  Spawns a dedicated thread with its own
+/// Start the outbound relay tunnel. Spawns a dedicated thread with its own
 /// tokio runtime that maintains a persistent WSS connection to the relay host
 /// endpoint, forwarding pane screen updates and routing client input back.
 pub fn start_tunnel(tunnel_url: String) {
@@ -585,45 +863,66 @@ async fn run_tunnel_session(
     let (ws_stream, _) = connect_async(url).await.context("tunnel connect")?;
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    // Send initial snapshots for all active panes so the client has content
-    // immediately on connect.
+    let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<AiEvent>();
+    let cancel_handles: CancelMap = Arc::new(Mutex::new(HashMap::new()));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
     if let Some(mux) = Mux::try_get() {
         for pane in mux.iter_panes() {
             let pid: usize = pane.pane_id().into();
             if let Some(update) = capture_pane(pid) {
-                if let Ok(json) = serde_json::to_string(&update) {
+                let msg = ServerMsg::Screen(update);
+                if let Ok(json) = serde_json::to_string(&msg) {
                     ws_tx.send(Message::Text(json.into())).await?;
                 }
             }
         }
     }
 
-    // Forward screen updates → relay → client
+    let cancel_handles_fwd = cancel_handles.clone();
     let fwd = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(update) => {
-                    if let Ok(json) = serde_json::to_string(&update) {
+            tokio::select! {
+                biased;
+                ai = ai_rx.recv() => {
+                    let Some(event) = ai else { break };
+                    if let AiEvent::AiDone { conversation_id }
+                        | AiEvent::AiError { conversation_id, .. } = &event
+                    {
+                        finish_ai_conversation(conversation_id, &cancel_handles_fwd);
+                    }
+                    let msg: ServerMsg = event.into();
+                    if let Ok(json) = serde_json::to_string(&msg) {
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
                             break;
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+                recv = rx.recv() => {
+                    match recv {
+                        Ok(update) => {
+                            let msg = ServerMsg::Screen(update);
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
             }
         }
     });
 
-    // Handle input from client (via relay) → pane PTY
     while let Some(msg) = ws_rx.next().await {
         match msg? {
-            Message::Text(text) => {
-                if let Ok(ClientMsg::Input {
+            Message::Text(text) => match serde_json::from_str::<ClientMsg>(text.as_str()) {
+                Ok(ClientMsg::Input {
                     pane_id,
                     text: input,
-                }) = serde_json::from_str::<ClientMsg>(text.as_str())
-                {
+                }) => {
                     if input.len() > MAX_INPUT_LEN {
                         log::warn!(
                             "kaku-tunnel: input too large ({} bytes), dropping",
@@ -632,7 +931,6 @@ async fn run_tunnel_session(
                         continue;
                     }
                     if let Some(mux) = Mux::try_get() {
-                        // Route to the specified pane, falling back to the first pane.
                         let target = pane_id
                             .and_then(|id| mux.get_pane(mux::pane::PaneId::from(id)))
                             .or_else(|| mux.iter_panes().into_iter().next());
@@ -643,7 +941,26 @@ async fn run_tunnel_session(
                         }
                     }
                 }
-            }
+                Ok(ClientMsg::Scroll { .. }) => {}
+                Ok(ClientMsg::AiChat {
+                    conversation_id,
+                    content,
+                    attach_pane,
+                }) => {
+                    dispatch_ai_chat(
+                        conversation_id,
+                        content,
+                        attach_pane,
+                        &ai_tx,
+                        &cancel_handles,
+                        &in_flight,
+                    );
+                }
+                Ok(ClientMsg::AiCancel { conversation_id }) => {
+                    cancel_ai_conversation(&conversation_id, &cancel_handles);
+                }
+                Err(e) => log::debug!("kaku-tunnel: unknown message: {}", e),
+            },
             Message::Close(_) => break,
             _ => {}
         }
