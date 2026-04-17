@@ -168,8 +168,8 @@ if [[ -z "$APPLE_ID" || -z "$PASSWORD" || -z "$TEAM_ID" ]]; then
 fi
 
 echo "Submitting via notarytool (Apple ID fallback)..."
-echo "  Apple ID: $APPLE_ID"
-echo "  Team ID: $TEAM_ID"
+echo "  Apple ID: ${APPLE_ID:0:3}***"
+echo "  Team ID:  ${TEAM_ID:0:3}***"
 echo "  File: $SUBMISSION_PATH"
 echo ""
 echo "Uploading to Apple notarization service (this may take a few minutes)..."

@@ -19,6 +19,11 @@ set -euo pipefail
 #   REQUIRE_HOMEBREW_TAP_UPDATE - Set to 0 to allow release to continue when tap update fails (default: 1)
 #   RUN_CLIPPY               - Set to 1 to also run clippy (default: 0)
 #   SKIP_TESTS               - Set to 1 to skip tests (default: 0)
+#
+# Resume flags (skip earlier stages after a mid-release failure):
+#   --notarize-only  Skip build; notarize existing dist/Kaku.app, upload, tap.
+#   --upload-only    Skip build + notarize; upload existing dist/Kaku.dmg + tap.
+#   --tap-only       Only re-dispatch the Homebrew tap update.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -32,6 +37,19 @@ SKIP_TESTS="${SKIP_TESTS:-0}"
 GITHUB_REPO="${GITHUB_REPO:-tw93/Kaku}"
 HOMEBREW_TAP_REPO="${HOMEBREW_TAP_REPO:-tw93/homebrew-tap}"
 REQUIRE_HOMEBREW_TAP_UPDATE="${REQUIRE_HOMEBREW_TAP_UPDATE:-1}"
+
+# Resume stage flags.
+SKIP_BUILD=0
+SKIP_NOTARIZE=0
+SKIP_UPLOAD=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --notarize-only) SKIP_BUILD=1 ;;
+        --upload-only)   SKIP_BUILD=1; SKIP_NOTARIZE=1 ;;
+        --tap-only)      SKIP_BUILD=1; SKIP_NOTARIZE=1; SKIP_UPLOAD=1 ;;
+    esac
+done
 
 # Colors for output
 RED='\033[0;31m'
@@ -522,26 +540,41 @@ main() {
     version=$(get_cargo_version)
     log_info "Releasing version: $version"
 
-    # Run all checks
+    # Always-on pre-flight (cheap and catches misconfiguration on resume too)
     check_clean_git
     check_version_consistency
-    check_release_notes
-    check_release_config
     check_gh_auth
-    validate_release_profile
-    detect_signing_identity
-    check_notarization_creds
-    run_checks
 
-    # Build and notarize
-    build_release
-    notarize_release
+    if [[ "$SKIP_BUILD" -eq 0 ]]; then
+        check_release_notes
+        check_release_config
+        validate_release_profile
+        detect_signing_identity
+        check_notarization_creds
+        run_checks
+        build_release
+    else
+        log_warn "Skipping build (resume flag)"
+        if [[ ! -f "$OUT_DIR/Kaku.dmg" ]]; then
+            die "Resume requires prior build; $OUT_DIR/Kaku.dmg not found."
+        fi
+        detect_signing_identity
+    fi
 
-    # Create tag and release
-    create_tag "$version"
-    create_github_release "$version"
+    if [[ "$SKIP_NOTARIZE" -eq 0 ]]; then
+        check_notarization_creds
+        notarize_release
+    else
+        log_warn "Skipping notarize (resume flag)"
+    fi
 
-    # Optional: Update Homebrew tap
+    if [[ "$SKIP_UPLOAD" -eq 0 ]]; then
+        create_tag "$version"
+        create_github_release "$version"
+    else
+        log_warn "Skipping upload (resume flag); tap dispatch only"
+    fi
+
     update_homebrew_tap "$version"
 
     log_info "Release $version complete!"
