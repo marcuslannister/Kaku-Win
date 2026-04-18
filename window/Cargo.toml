@@ -57,3 +57,23 @@ objc.workspace = true
 objc2-core-graphics.workspace = true
 plist.workspace = true
 shlex.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win.workspace = true
+shared_library.workspace = true
+winapi = { workspace = true, features = [
+    "dwmapi",
+    "handleapi",
+    "imm",
+    "libloaderapi",
+    "shellscalingapi",
+    "synchapi",
+    "sysinfoapi",
+    "winerror",
+    "winuser",
+] }
+windows = { workspace = true, features = [
+    "UI_ViewManagement",
+    "Win32_Devices_Display",
+] }
+winreg.workspace = true
