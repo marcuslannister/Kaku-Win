@@ -10,7 +10,20 @@ impl UpdateCommand {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod imp {
+    use anyhow::bail;
+
+    pub fn run() -> anyhow::Result<()> {
+        bail!(
+            "`kaku update` is not supported on Windows; install updates via your package \
+             manager (e.g. `winget upgrade kaku` or `scoop update kaku`) or download the \
+             latest release from https://github.com/tw93/Kaku/releases"
+        )
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 mod imp {
     use anyhow::bail;
 

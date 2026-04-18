@@ -23,9 +23,9 @@ struct CachedTheme {
 }
 
 static THEME_CACHE: Mutex<Option<(usize, CachedTheme)>> = Mutex::new(None);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 static APPEARANCE_CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 const APPEARANCE_CACHE_TTL: Duration = Duration::from_secs(1);
 
 fn rgb(hex: &str) -> SrgbaTuple {
@@ -314,7 +314,34 @@ fn is_macos_dark_mode() -> bool {
     is_dark
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Detects whether Windows is currently running in Dark Mode by reading the
+/// `AppsUseLightTheme` DWORD value under
+/// `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize`.
+/// A value of 0 means apps render in dark mode; 1 means light.
+/// Returns false when detection is unavailable.
+#[cfg(windows)]
+fn is_macos_dark_mode() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let now = Instant::now();
+    let mut cache = APPEARANCE_CACHE.lock().unwrap();
+    if let Some((checked_at, is_dark)) = *cache {
+        if now.duration_since(checked_at) < APPEARANCE_CACHE_TTL {
+            return is_dark;
+        }
+    }
+
+    let is_dark = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme"))
+        .map(|apps_use_light| apps_use_light == 0)
+        .unwrap_or(false);
+    *cache = Some((now, is_dark));
+    is_dark
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn is_macos_dark_mode() -> bool {
     false
 }

@@ -1196,11 +1196,7 @@ fn managed_bin_dir() -> PathBuf {
     } else {
         "zsh"
     };
-    home_dir()
-        .join(".config")
-        .join("kaku")
-        .join(shell_dir)
-        .join("bin")
+    config::KAKU_CONFIG_DIR.join(shell_dir).join("bin")
 }
 
 fn managed_wrapper_path() -> PathBuf {
@@ -1209,17 +1205,9 @@ fn managed_wrapper_path() -> PathBuf {
 
 fn managed_init_file() -> PathBuf {
     if detect_shell_kind() == ShellKind::Fish {
-        home_dir()
-            .join(".config")
-            .join("kaku")
-            .join("fish")
-            .join("kaku.fish")
+        config::KAKU_CONFIG_DIR.join("fish").join("kaku.fish")
     } else {
-        home_dir()
-            .join(".config")
-            .join("kaku")
-            .join("zsh")
-            .join("kaku.zsh")
+        config::KAKU_CONFIG_DIR.join("zsh").join("kaku.zsh")
     }
 }
 

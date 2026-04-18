@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context};
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -18,7 +17,44 @@ impl ResetCommand {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod imp {
+    use super::*;
+
+    pub fn run(yes: bool) -> anyhow::Result<()> {
+        let config_dir = config::KAKU_CONFIG_DIR.clone();
+
+        if !config_dir.exists() {
+            println!("Nothing to reset: {} does not exist.", config_dir.display());
+            return Ok(());
+        }
+
+        if !yes && io::stdin().is_terminal() {
+            print!(
+                "This will remove {}. Continue? [y/N] ",
+                config_dir.display()
+            );
+            io::stdout().flush().ok();
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer).context("read confirmation")?;
+            if !matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+                bail!("aborted");
+            }
+        } else if !yes {
+            bail!("refusing to run without --yes in a non-interactive context");
+        }
+
+        std::fs::remove_dir_all(&config_dir)
+            .with_context(|| format!("remove {}", config_dir.display()))?;
+        println!("Removed {}.", config_dir.display());
+        println!(
+            "Shell integration on Windows is not managed by Kaku, so no shell config was modified."
+        );
+        Ok(())
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 mod imp {
     use anyhow::bail;
 
@@ -30,6 +66,7 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod imp {
     use super::*;
+    use std::os::unix::process::CommandExt;
 
     const KAKU_SOURCE_PATTERN: &str = "kaku/zsh/kaku.zsh";
     const KAKU_PATH_MARKER: &str = "# Kaku PATH Integration";
@@ -366,7 +403,7 @@ mod imp {
     }
 
     fn config_home() -> PathBuf {
-        home_dir().join(".config").join("kaku")
+        config::KAKU_CONFIG_DIR.clone()
     }
 
     fn zshrc_path() -> PathBuf {

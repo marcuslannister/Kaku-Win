@@ -63,6 +63,9 @@ features = [
 ]
 workspace = true
 
+[target."cfg(windows)".dependencies]
+winreg.workspace = true
+
 [target."cfg(windows)".build-dependencies]
 cc.workspace = true
 embed-resource.workspace = true

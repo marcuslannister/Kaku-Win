@@ -80,11 +80,10 @@ fn resolve_bundled_kaku_bin() -> anyhow::Result<PathBuf> {
         }
     }
 
+    #[cfg(not(windows))]
     add_candidate(
         &mut candidates,
-        config::HOME_DIR
-            .join(".config")
-            .join("kaku")
+        config::KAKU_CONFIG_DIR
             .join("zsh")
             .join("bin")
             .join("kaku"),

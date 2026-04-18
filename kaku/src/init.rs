@@ -18,7 +18,19 @@ impl InitCommand {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod imp {
+    use anyhow::bail;
+
+    pub fn run(_update_only: bool) -> anyhow::Result<()> {
+        bail!(
+            "`kaku init` is not yet supported on Windows; edit %APPDATA%\\kaku\\kaku.lua \
+             directly or run `kaku config open`"
+        )
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 mod imp {
     use anyhow::bail;
 
@@ -118,12 +130,7 @@ exit 127
             ShellKind::Fish => "fish",
             _ => "zsh",
         };
-        config::HOME_DIR
-            .join(".config")
-            .join("kaku")
-            .join(dir)
-            .join("bin")
-            .join("kaku")
+        config::KAKU_CONFIG_DIR.join(dir).join("bin").join("kaku")
     }
 
     fn resolve_preferred_kaku_bin() -> Option<PathBuf> {

@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check build app dev check test install-tools install-hooks test-webgpu-fallback release dmg nightly
+.PHONY: all fmt fmt-check build app dev check test install-tools install-hooks test-webgpu-fallback release dmg nightly build-windows
 
 all: build
 
@@ -39,6 +39,9 @@ dev:
 
 build:
 	cargo build --locked $(BUILD_OPTS) -p kaku -p kaku-gui -p wezterm-mux-server-impl
+
+build-windows:
+	powershell -File scripts/build-windows.ps1
 
 fmt:
 	cargo +nightly fmt -p kaku -p kaku-gui -p mux -p wezterm-term -p termwiz -p config -p wezterm-font

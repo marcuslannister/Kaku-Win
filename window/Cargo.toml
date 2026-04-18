@@ -72,8 +72,5 @@ winapi = { workspace = true, features = [
     "winerror",
     "winuser",
 ] }
-windows = { workspace = true, features = [
-    "UI_ViewManagement",
-    "Win32_Devices_Display",
-] }
+windows = { workspace = true, features = ["UI_ViewManagement"] }
 winreg.workspace = true

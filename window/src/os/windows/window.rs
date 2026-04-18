@@ -341,6 +341,7 @@ impl WindowInner {
                 dimensions: current_dims,
                 window_state: get_window_state(self.hwnd.0),
                 live_resizing: self.in_size_move,
+                screen_changed: false,
             });
         }
 
@@ -1739,6 +1740,7 @@ fn apply_mouse_cursor(cursor: Option<MouseCursor>) {
                     MouseCursor::Text => IDC_IBEAM,
                     MouseCursor::SizeUpDown => IDC_SIZENS,
                     MouseCursor::SizeLeftRight => IDC_SIZEWE,
+                    MouseCursor::Grabbing => IDC_SIZEALL,
                 },
             ));
         },

@@ -1153,7 +1153,7 @@ impl TermWindow {
                     }
                     let window = self.window.clone().unwrap();
                     let (overlay, future) = start_overlay(self, &tab, move |tab_id, term| {
-                        confirm_close_window(term, mux_window_id, window, tab_id)
+                        crate::overlay::confirm_close_window(term, mux_window_id, window, tab_id)
                     });
                     self.assign_overlay(tab.tab_id(), overlay);
                     promise::spawn::spawn(future).detach();

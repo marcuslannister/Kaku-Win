@@ -92,8 +92,7 @@ pub(crate) fn onboarding_flag_path() -> std::path::PathBuf {
 }
 
 fn kaku_config_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    std::path::PathBuf::from(home).join(".config").join("kaku")
+    config::KAKU_CONFIG_DIR.clone()
 }
 
 /// All tools exposed to the model, filtered by the active configuration.

@@ -55,12 +55,8 @@ impl Tool {
     fn config_path(&self) -> PathBuf {
         let home = config::HOME_DIR.clone();
         match self {
-            Tool::KakuAssistant => assistant_config::assistant_toml_path().unwrap_or_else(|_| {
-                config::HOME_DIR
-                    .join(".config")
-                    .join("kaku")
-                    .join("assistant.toml")
-            }),
+            Tool::KakuAssistant => assistant_config::assistant_toml_path()
+                .unwrap_or_else(|_| config::KAKU_CONFIG_DIR.join("assistant.toml")),
             Tool::ClaudeCode => home.join(".claude").join("settings.json"),
             Tool::Codex => home.join(".codex").join("config.toml"),
             Tool::Kimi => home.join(".kimi").join("config.toml"),

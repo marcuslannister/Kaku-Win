@@ -91,6 +91,18 @@ type ErrorCallback = fn(&str);
 
 lazy_static! {
     pub static ref HOME_DIR: PathBuf = dirs_next::home_dir().expect("can't find HOME dir");
+    pub static ref KAKU_CONFIG_DIR: PathBuf = {
+        #[cfg(windows)]
+        {
+            dirs_next::config_dir()
+                .expect("can't find config dir")
+                .join("kaku")
+        }
+        #[cfg(not(windows))]
+        {
+            HOME_DIR.join(".config").join("kaku")
+        }
+    };
     pub static ref CONFIG_DIRS: Vec<PathBuf> = config_dirs();
     pub static ref RUNTIME_DIR: PathBuf = compute_runtime_dir().unwrap();
     pub static ref DATA_DIR: PathBuf = compute_data_dir().unwrap();
@@ -536,7 +548,7 @@ pub fn user_config_path() -> PathBuf {
     CONFIG_DIRS
         .first()
         .cloned()
-        .unwrap_or_else(|| HOME_DIR.join(".config").join("kaku"))
+        .unwrap_or_else(|| KAKU_CONFIG_DIR.clone())
         .join("kaku.lua")
 }
 
@@ -833,12 +845,19 @@ fn config_dirs_from(
 }
 
 fn config_dirs() -> Vec<PathBuf> {
-    config_dirs_from(
-        &HOME_DIR,
-        std::env::var_os("XDG_CONFIG_HOME"),
-        #[cfg(unix)]
-        std::env::var_os("XDG_CONFIG_DIRS"),
-    )
+    #[cfg(windows)]
+    {
+        return vec![KAKU_CONFIG_DIR.clone()];
+    }
+    #[cfg(not(windows))]
+    {
+        config_dirs_from(
+            &HOME_DIR,
+            std::env::var_os("XDG_CONFIG_HOME"),
+            #[cfg(unix)]
+            std::env::var_os("XDG_CONFIG_DIRS"),
+        )
+    }
 }
 
 #[cfg(test)]
