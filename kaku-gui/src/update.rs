@@ -286,6 +286,12 @@ fn update_checker() {
 }
 
 pub fn start_update_checker() {
+    #[cfg(windows)]
+    {
+        log::info!("start_update_checker: disabled on Windows; GUI update checks are unsupported");
+        return;
+    }
+
     static CHECKER_STARTED: AtomicBool = AtomicBool::new(false);
     if let Ok(false) =
         CHECKER_STARTED.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)

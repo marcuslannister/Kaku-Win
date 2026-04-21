@@ -123,6 +123,7 @@ pub(crate) struct WindowInner {
 
     keyboard_info: KeyboardLayoutInfo,
     appearance: Appearance,
+    last_monitor: Option<HMONITOR>,
 
     config: ConfigHandle,
     paint_throttled: bool,
@@ -320,6 +321,7 @@ impl WindowInner {
         }
         let pixel_width = rect_width(&rect) as usize;
         let pixel_height = rect_height(&rect) as usize;
+        let current_monitor = unsafe { MonitorFromWindow(self.hwnd.0, MONITOR_DEFAULTTONEAREST) };
 
         let current_dims = Dimensions {
             pixel_width,
@@ -327,25 +329,32 @@ impl WindowInner {
             dpi: self.get_effective_dpi(),
         };
 
-        let same = self
-            .last_size
-            .as_ref()
-            .map(|&dims| dims == current_dims)
+        let previous_dims = self.last_size;
+        let previous_monitor = self.last_monitor;
+        let screen_changed = previous_monitor
+            .map(|monitor| monitor != current_monitor)
+            .unwrap_or(false)
+            || previous_dims
+                .map(|dims| dims.dpi != current_dims.dpi)
+                .unwrap_or(false);
+        let same = previous_dims
+            .map(|dims| dims == current_dims)
             .unwrap_or(false);
         self.last_size.replace(current_dims);
+        self.last_monitor.replace(current_monitor);
 
-        if !same {
+        if !same || screen_changed {
             self.set_ime_window_position(Rect::default());
 
             self.events.dispatch(WindowEvent::Resized {
                 dimensions: current_dims,
                 window_state: get_window_state(self.hwnd.0),
                 live_resizing: self.in_size_move,
-                screen_changed: false,
+                screen_changed,
             });
         }
 
-        !same
+        !same || screen_changed
     }
 
     fn apply_decoration(&mut self) {
@@ -546,6 +555,7 @@ impl Window {
             hscroll_remainder: 0,
             keyboard_info: KeyboardLayoutInfo::new(),
             last_size: None,
+            last_monitor: None,
             in_size_move: false,
             dead_pending: None,
             saved_placement: None,

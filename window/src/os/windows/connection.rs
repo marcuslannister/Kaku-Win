@@ -270,21 +270,6 @@ impl ScreenInfoHelper {
     pub fn monitor_name(&self, mi: &MONITORINFOEXW) -> String {
         unsafe {
             let monitor_name = wstr(&mi.szDevice);
-            let friendly_name = match self.friendly_names.get(&monitor_name) {
-                Some(name) => name.to_string(),
-                None => {
-                    // Fall back to EnumDisplayDevicesW.
-                    // It likely has a terribly generic name like "Generic PnP Monitor".
-                    let mut display_device: DISPLAY_DEVICEW = std::mem::zeroed();
-                    display_device.cb = std::mem::size_of::<DISPLAY_DEVICEW>() as u32;
-
-                    if EnumDisplayDevicesW(mi.szDevice.as_ptr(), 0, &mut display_device, 0) != 0 {
-                        wstr(&display_device.DeviceString)
-                    } else {
-                        "Unknown".to_string()
-                    }
-                }
-            };
 
             let adapter_name = match self.gdi_to_adapater.get(&monitor_name) {
                 Some(name) => name.to_string(),
@@ -298,9 +283,11 @@ impl ScreenInfoHelper {
                 monitor_name
             };
 
-            let monitor_name = format!("{monitor_name}: {friendly_name} on {adapter_name}");
-
-            monitor_name
+            if let Some(friendly_name) = self.friendly_names.get(&monitor_name) {
+                format!("{monitor_name}: {friendly_name} on {adapter_name}")
+            } else {
+                format!("{monitor_name} on {adapter_name}")
+            }
         }
     }
 }

@@ -878,20 +878,23 @@ impl CommandDef {
                         ));
                         menu.add_item(&check_update);
 
-                        let set_default_terminal_item = MenuItem::new_with(
-                            "Set as Default Terminal",
-                            Some(kaku_perform_key_assignment_sel),
-                            "",
-                        );
-                        set_default_terminal_item.set_represented_item(
-                            RepresentedItem::KeyAssignment(KeyAssignment::EmitEvent(
-                                crate::frontend::SET_DEFAULT_TERMINAL_EVENT.to_string(),
-                            )),
-                        );
-                        if let Some(conn) = Connection::get() {
-                            set_default_terminal_item.set_state(conn.is_default_terminal());
+                        #[cfg(target_os = "macos")]
+                        {
+                            let set_default_terminal_item = MenuItem::new_with(
+                                "Set as Default Terminal",
+                                Some(kaku_perform_key_assignment_sel),
+                                "",
+                            );
+                            set_default_terminal_item.set_represented_item(
+                                RepresentedItem::KeyAssignment(KeyAssignment::EmitEvent(
+                                    crate::frontend::SET_DEFAULT_TERMINAL_EVENT.to_string(),
+                                )),
+                            );
+                            if let Some(conn) = Connection::get() {
+                                set_default_terminal_item.set_state(conn.is_default_terminal());
+                            }
+                            menu.add_item(&set_default_terminal_item);
                         }
-                        menu.add_item(&set_default_terminal_item);
 
                         menu.add_item(&MenuItem::new_separator());
 

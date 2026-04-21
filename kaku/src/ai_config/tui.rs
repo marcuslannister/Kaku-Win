@@ -14,7 +14,6 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
-use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -886,7 +885,7 @@ fn post_antigravity_lsp_json(
     let url = format!("https://127.0.0.1:{https_port}{path}");
 
     // Token is sent through argv for portability across environments.
-    let output = std::process::Command::new("/usr/bin/curl")
+    let output = std::process::Command::new(curl_program())
         .args([
             "-k",
             "-sS",
@@ -945,6 +944,16 @@ fn post_antigravity_lsp_json(
     }
 
     Some(parsed)
+}
+
+#[cfg(windows)]
+fn curl_program() -> &'static str {
+    "curl.exe"
+}
+
+#[cfg(not(windows))]
+fn curl_program() -> &'static str {
+    "/usr/bin/curl"
 }
 
 fn antigravity_unleash_probe(https_port: u16, csrf_token: &str) -> bool {
@@ -1705,7 +1714,7 @@ fn write_json_cache(path: &Path, value: &serde_json::Value) {
 fn run_curl(args: &[&str]) -> Option<serde_json::Value> {
     // Request headers are passed via argv for portability, which means short-lived
     // tokens may be visible to local process inspectors such as `ps` while curl runs.
-    let output = std::process::Command::new(OsStr::new("/usr/bin/curl"))
+    let output = std::process::Command::new(curl_program())
         .args(args)
         .output()
         .ok()?;
@@ -1784,6 +1793,7 @@ where
     load_usage_json_from_cache(&path, context)
 }
 
+#[cfg(target_os = "macos")]
 fn read_claude_oauth_credentials() -> Option<serde_json::Value> {
     let output = std::process::Command::new("/usr/bin/security")
         .args([
@@ -1810,6 +1820,11 @@ fn read_claude_oauth_credentials() -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(raw.trim())
         .map_err(|err| log::debug!("failed to parse claude keychain json: {}", err))
         .ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_claude_oauth_credentials() -> Option<serde_json::Value> {
+    None
 }
 
 fn read_claude_oauth_access_token() -> Option<String> {
@@ -1841,6 +1856,7 @@ fn parse_claude_keychain_account(raw: &str) -> Option<String> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn read_claude_keychain_account() -> Option<String> {
     let output = std::process::Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", "Claude Code-credentials"])
@@ -1862,6 +1878,12 @@ fn read_claude_keychain_account() -> Option<String> {
     parse_claude_keychain_account(&raw)
 }
 
+#[cfg(not(target_os = "macos"))]
+fn read_claude_keychain_account() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
 fn write_claude_oauth_credentials(credentials: &serde_json::Value) -> Option<()> {
     let account = read_claude_keychain_account()?;
     let secret = serde_json::to_string(credentials)
@@ -1892,6 +1914,11 @@ fn write_claude_oauth_credentials(credentials: &serde_json::Value) -> Option<()>
     }
 
     Some(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_claude_oauth_credentials(_credentials: &serde_json::Value) -> Option<()> {
+    None
 }
 
 fn refresh_claude_oauth_access_token() -> Option<String> {
@@ -2854,7 +2881,7 @@ fn fetch_kaku_assistant_models(api_key: &str, base_url: &str) -> Vec<String> {
     let url = format!("{}/models", base_url);
     // Pass Authorization header via --config - (stdin) to avoid argv exposure.
     let curl_config = format!("header = \"Authorization: Bearer {}\"", api_key);
-    let mut child = match std::process::Command::new("/usr/bin/curl")
+    let mut child = match std::process::Command::new(curl_program())
         .args(["-sS", "--fail", "--max-time", "3", "--config", "-", &url])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -4832,11 +4859,10 @@ impl App {
     fn open_in_terminal(&mut self, cmd: &str) {
         // Prefer a new tab in the current Kaku window.
         // kaku cli spawn reads WEZTERM_PANE from the environment to target the right window.
-        // Append `exec $SHELL` so the pane stays alive after the command finishes.
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell_cmd = format!("{}; exec \"{}\"", cmd, shell);
+        // Keep the shell open after the command finishes so the user can inspect output.
+        let (shell, shell_flag, shell_cmd) = open_in_terminal_spawn_args(cmd);
         let kaku_status = std::process::Command::new("kaku")
-            .args(["cli", "spawn", "--", &shell, "-c", &shell_cmd])
+            .args(["cli", "spawn", "--", &shell, shell_flag, &shell_cmd])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -4846,17 +4872,43 @@ impl App {
             return;
         }
 
-        // Fallback: open in macOS Terminal.app via osascript.
-        let script = format!("tell application \"Terminal\" to do script \"{}\"", cmd);
-        match std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .spawn()
-        {
+        match spawn_external_terminal(cmd) {
             Ok(_) => self.set_status("Opening in new terminal window..."),
             Err(_) => self.set_status(format!("Failed to open terminal. Run '{}' manually", cmd)),
         }
     }
+}
+
+#[cfg(windows)]
+fn open_in_terminal_spawn_args(cmd: &str) -> (String, &'static str, String) {
+    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    let shell_cmd = format!("{cmd} & echo. & echo Press any key to close... & pause >nul");
+    (shell, "/K", shell_cmd)
+}
+
+#[cfg(not(windows))]
+fn open_in_terminal_spawn_args(cmd: &str) -> (String, &'static str, String) {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let shell_cmd = format!("{cmd}; exec \"{shell}\"");
+    (shell, "-c", shell_cmd)
+}
+
+#[cfg(windows)]
+fn spawn_external_terminal(cmd: &str) -> std::io::Result<()> {
+    std::process::Command::new("cmd.exe")
+        .args(["/C", "start", "", "cmd.exe", "/K", cmd])
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn spawn_external_terminal(cmd: &str) -> std::io::Result<()> {
+    let script = format!("tell application \"Terminal\" to do script \"{}\"", cmd);
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn()?;
+    Ok(())
 }
 
 fn save_field(tool: Tool, field_key: &str, new_val: &str) -> anyhow::Result<()> {

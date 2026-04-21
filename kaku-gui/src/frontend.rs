@@ -63,6 +63,14 @@ fn resolve_bundled_kaku_bin() -> anyhow::Result<PathBuf> {
         }
     }
 
+    fn add_companion_candidates(candidates: &mut Vec<PathBuf>, parent: &Path) {
+        #[cfg(windows)]
+        {
+            add_candidate(candidates, parent.join("kaku.exe"));
+        }
+        add_candidate(candidates, parent.join("kaku"));
+    }
+
     let mut candidates = Vec::new();
 
     if let Some(path) = std::env::var_os("KAKU_BIN") {
@@ -71,12 +79,12 @@ fn resolve_bundled_kaku_bin() -> anyhow::Result<PathBuf> {
 
     let current_exe = std::env::current_exe().context("resolve executable path")?;
     if let Some(parent) = current_exe.parent() {
-        add_candidate(&mut candidates, parent.join("kaku"));
+        add_companion_candidates(&mut candidates, parent);
     }
 
     if let Ok(resolved_exe) = std::fs::canonicalize(&current_exe) {
         if let Some(parent) = resolved_exe.parent() {
-            add_candidate(&mut candidates, parent.join("kaku"));
+            add_companion_candidates(&mut candidates, parent);
         }
     }
 
@@ -127,6 +135,10 @@ pub(crate) fn kaku_cli_program_for_spawn() -> String {
             // Finder-launched apps can have a minimal PATH; fall back only when
             // we cannot resolve the bundled companion binary.
             log::warn!("Falling back to PATH lookup for `kaku`: {err:#}");
+            #[cfg(windows)]
+            {
+                return "kaku.exe".to_string();
+            }
             "kaku".to_string()
         }
     }
@@ -156,6 +168,12 @@ pub fn open_kaku_config() {
 }
 
 pub fn run_kaku_update_from_menu() {
+    #[cfg(windows)]
+    {
+        wezterm_open_url::open_url("https://github.com/tw93/Kaku/releases/latest");
+        return;
+    }
+
     static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
     if UPDATE_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -174,39 +192,7 @@ pub fn run_kaku_doctor_in_new_tab() {
 fn run_kaku_subcommand_in_new_tab(subcommand: &str, running_flag: Option<&'static AtomicBool>) {
     let subcommand = subcommand.to_string();
     let kaku_bin = kaku_cli_program_for_spawn();
-    let fallback_bin = shlex::try_quote(&kaku_bin)
-        .map(|q| q.into_owned())
-        .unwrap_or_else(|_| kaku_bin.clone());
-
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-    let shell_name = Path::new(&shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    // Use login + interactive shell (-lic / -l -i -c) to match the default Kaku
-    // tab behavior (argv0 = "-zsh"). This ensures ~/.zprofile is sourced, where
-    // macOS users typically export proxy variables (https_proxy, ALL_PROXY, etc.).
-    // Without -l, the GUI process env (launched via launchd with a minimal
-    // environment) is inherited and ~/.zprofile is never loaded, so curl hits
-    // api.github.com without a proxy -- causing 30+ second timeouts on Chinese
-    // networks. The extra few hundred ms of profile loading is negligible.
-    let shell_args = if shell_name == "fish" {
-        vec![
-            shell.clone(),
-            "-l".to_string(),
-            "-i".to_string(),
-            "-c".to_string(),
-            format!("{fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read -l dummy"),
-        ]
-    } else {
-        vec![
-            shell.clone(),
-            "-lic".to_string(),
-            format!(
-                "{fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read dummy"
-            ),
-        ]
-    };
+    let shell_args = build_kaku_subcommand_shell_args(&kaku_bin, &subcommand);
 
     let flag = running_flag.map(|f| f as *const AtomicBool as usize);
 
@@ -256,6 +242,52 @@ fn run_kaku_subcommand_in_new_tab(subcommand: &str, running_flag: Option<&'stati
         }
     })
     .detach();
+}
+
+#[cfg(windows)]
+fn build_kaku_subcommand_shell_args(kaku_bin: &str, subcommand: &str) -> Vec<String> {
+    let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+    let command = format!(
+        "\"{kaku_bin}\" {subcommand} & echo. & echo Press any key to close... & pause >nul"
+    );
+    vec![comspec, "/C".to_string(), command]
+}
+
+#[cfg(not(windows))]
+fn build_kaku_subcommand_shell_args(kaku_bin: &str, subcommand: &str) -> Vec<String> {
+    let fallback_bin = shlex::try_quote(kaku_bin)
+        .map(|q| q.into_owned())
+        .unwrap_or_else(|_| kaku_bin.to_string());
+
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let shell_name = Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    // Use login + interactive shell (-lic / -l -i -c) to match the default Kaku
+    // tab behavior (argv0 = "-zsh"). This ensures ~/.zprofile is sourced, where
+    // macOS users typically export proxy variables (https_proxy, ALL_PROXY, etc.).
+    // Without -l, the GUI process env (launched via launchd with a minimal
+    // environment) is inherited and ~/.zprofile is never loaded, so curl hits
+    // api.github.com without a proxy -- causing 30+ second timeouts on Chinese
+    // networks. The extra few hundred ms of profile loading is negligible.
+    if shell_name == "fish" {
+        vec![
+            shell.clone(),
+            "-l".to_string(),
+            "-i".to_string(),
+            "-c".to_string(),
+            format!("{fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read -l dummy"),
+        ]
+    } else {
+        vec![
+            shell.clone(),
+            "-lic".to_string(),
+            format!(
+                "{fallback_bin} {subcommand}; printf '\\nPress Enter to close...\\n'; read dummy"
+            ),
+        ]
+    }
 }
 
 pub fn set_default_terminal_with_feedback() {

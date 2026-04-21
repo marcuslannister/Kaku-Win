@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🐛 Bug Fixes
+
+- Correct the destination Y coordinate when scrolling a region in the Windows console renderer
+
 ## [termwiz-0.23.3] - 2025-03-20
 
 ### 💼 Other
